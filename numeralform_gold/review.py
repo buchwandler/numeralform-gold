@@ -97,12 +97,12 @@ def blind_review_case(record: Mapping[str, Any], reviewer_slot: str) -> dict[str
     return case
 
 
-
 def neutral_review_case(record: Mapping[str, Any]) -> dict[str, Any]:
     """Project a candidate into a slot-independent semantic review case."""
     case = blind_review_case(record, "A")
     case.pop("reviewer_slot", None)
     return case
+
 
 def review_case(record: Mapping[str, Any], reviewer_slot: str) -> dict[str, Any]:
     """Backward-compatible alias for :func:`blind_review_case`."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -11,6 +12,7 @@ from typing import Any
 
 from .io import write_jsonl
 from .review import assert_blind_safe, validate_review_rows
+from .review_anomaly import build_review_anomaly_report
 
 REVIEW_PACKET_MAX_CASES = 50
 REVIEW_PACKET_MAX_BYTES = 64 * 1024
@@ -29,6 +31,86 @@ def serialized_row_bytes(row: Mapping[str, Any]) -> int:
             "utf-8"
         )
     )
+
+
+def sha256_file(path: str | Path) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def case_ids_sha256(case_ids: Iterable[str]) -> str:
+    payload = json.dumps(sorted(case_ids), separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def validate_review_packet(
+    packet_rows: Iterable[Mapping[str, Any]],
+    result_rows: Iterable[Mapping[str, Any]],
+    *,
+    slot: str,
+    max_cases: int = REVIEW_PACKET_MAX_CASES,
+    max_bytes: int = REVIEW_PACKET_MAX_BYTES,
+) -> dict[str, Any]:
+    packet = _indexed_unique(packet_rows, "assigned packet")
+    results = _indexed_unique(result_rows, "packet result")
+    if not packet:
+        raise PacketError("assigned packet must not be empty")
+    if set(packet) != set(results):
+        raise PacketError(
+            "packet and result case-ID sets must match: "
+            f"missing={sorted(set(packet) - set(results))} "
+            f"extra={sorted(set(results) - set(packet))}"
+        )
+    if len(packet) > max_cases:
+        raise PacketError(
+            f"assigned packet exceeds case limit ({len(packet)} > {max_cases})"
+        )
+    packet_bytes = sum(serialized_row_bytes(row) for row in packet.values())
+    if packet_bytes > max_bytes:
+        raise PacketError(
+            f"assigned packet exceeds byte limit ({packet_bytes} > {max_bytes})"
+        )
+    languages = {row.get("language") for row in packet.values()}
+    if len(languages) != 1 or None in languages:
+        raise PacketError(
+            f"assigned packet must contain one language: {sorted(languages, key=str)}"
+        )
+    result_languages = {row.get("language") for row in results.values()}
+    if result_languages != languages:
+        raise PacketError("packet result language does not match assigned packet")
+    anomaly = build_review_anomaly_report(results.values(), slot=slot)
+    if anomaly["blocking_signals"]:
+        raise PacketError(
+            "packet result has blocking anomaly: "
+            + anomaly["blocking_signals"][0]["code"]
+        )
+    return {
+        "cases": len(packet),
+        "language": next(iter(languages)),
+        "packet_bytes": packet_bytes,
+        "anomaly_ready": anomaly["ready"],
+        "anomaly": anomaly,
+        "case_ids": sorted(packet),
+    }
+
+
+def build_review_receipt(
+    packet_path: str | Path,
+    result_path: str | Path,
+    *,
+    slot: str,
+    packet_audit: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0.0",
+        "slot": slot.upper(),
+        "packet": Path(packet_path).name,
+        "packet_sha256": sha256_file(packet_path),
+        "result_sha256": sha256_file(result_path),
+        "case_ids_sha256": case_ids_sha256(packet_audit["case_ids"]),
+        "cases": packet_audit["cases"],
+        "language": packet_audit["language"],
+        "anomaly_ready": packet_audit["anomaly_ready"],
+    }
 
 
 def select_packet_rows(
@@ -180,12 +262,16 @@ def merge_review_rows(
     *,
     slot: str,
     output: str | Path | None = None,
+    packet_rows: Iterable[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge a result packet while preserving immutable blind fields."""
     slot = slot.upper()
     blind = _indexed_unique(blind_rows, "blind")
     existing = _indexed_unique(existing_rows, "existing review")
     results = _indexed_unique(result_rows, "packet result")
+    if packet_rows is None:
+        raise PacketError("assigned packet is required")
+    validate_review_packet(packet_rows, results.values(), slot=slot)
     for case_id, row in results.items():
         if case_id not in blind:
             raise PacketError(f"review result has unknown case_id: {case_id}")
@@ -229,7 +315,6 @@ def _source_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, A
     return result
 
 
-
 def _evidence_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -237,6 +322,7 @@ def _evidence_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str,
         if isinstance(case_id, str):
             result.setdefault(case_id, []).append(_public(row))
     return result
+
 
 def adjudication_packet_rows(
     cases: Iterable[Mapping[str, Any]],
@@ -417,10 +503,14 @@ __all__ = [
     "REVIEW_PACKET_MAX_CASES",
     "PacketError",
     "adjudication_packet_rows",
+    "build_review_receipt",
+    "case_ids_sha256",
     "finalize_adjudication",
     "merge_adjudication_rows",
     "merge_review_rows",
     "review_packet_rows",
     "select_packet_rows",
     "serialized_row_bytes",
+    "sha256_file",
+    "validate_review_packet",
 ]

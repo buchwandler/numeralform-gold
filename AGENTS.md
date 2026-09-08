@@ -39,4 +39,5 @@ observation has its own source identity.
    explicit review/promotion change
 
 ## MVP limitation
+
 The review workflow now provides independent A/B packets, adjudication, preflight, and explicit finalization. Do not bypass those gates by bulk-marking generated or imported data as Gold.

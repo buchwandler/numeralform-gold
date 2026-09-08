@@ -22,10 +22,12 @@ from .importers import import_uninum
 from .io import read_jsonl, write_json, write_jsonl
 from .packets import (
     adjudication_packet_rows,
+    build_review_receipt,
     finalize_adjudication,
     merge_adjudication_rows,
     merge_review_rows,
     review_packet_rows,
+    validate_review_packet,
 )
 from .review import blind_review_case, neutral_review_case, validate_review_rows
 from .source_cache import verify_source_cache
@@ -265,7 +267,9 @@ def _validate_batch_candidates(candidates: list[dict[str, Any]]) -> None:
         raise ValueError("batch requires at least one candidate")
     report = validate_records(candidates)
     if report["errors"]:
-        raise ValueError("invalid candidates: " + json.dumps(report["issues"], ensure_ascii=False))
+        raise ValueError(
+            "invalid candidates: " + json.dumps(report["issues"], ensure_ascii=False)
+        )
     ids = [row["id"] for row in candidates]
     if len(ids) != len(set(ids)):
         raise ValueError("batch candidates contain duplicate record IDs")
@@ -274,7 +278,6 @@ def _validate_batch_candidates(candidates: list[dict[str, Any]]) -> None:
         raise ValueError("batch candidates contain duplicate semantic case IDs")
     if any(not row.get("source_observations") for row in candidates):
         raise ValueError("every candidate must contain source observations")
-
 
 
 def _batch_create(args: argparse.Namespace) -> int:
@@ -305,7 +308,9 @@ def _batch_create(args: argparse.Namespace) -> int:
             "candidate_quality": candidate.get("quality"),
             "observed_oracle": candidate.get("oracle"),
             "source_observations": candidate.get("source_observations", []),
-            "conflict": any(item.get("record_id") == candidate.get("id") for item in conflicts),
+            "conflict": any(
+                item.get("record_id") == candidate.get("id") for item in conflicts
+            ),
         }
         for case, candidate in zip(cases, candidates)
     ]
@@ -338,7 +343,6 @@ def _batch_create(args: argparse.Namespace) -> int:
     return 0
 
 
-
 def _rows_digest(rows: Any) -> str:
     import hashlib
 
@@ -346,7 +350,6 @@ def _rows_digest(rows: Any) -> str:
         rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
 
 
 def _batch_status(args: argparse.Namespace) -> int:
@@ -377,20 +380,26 @@ def _batch_status(args: argparse.Namespace) -> int:
         "exclude": sum(row.get("decision") == "exclude" for row in decisions),
         "unresolved": sum(row.get("decision") == "unresolved" for row in decisions),
     }
-    next_role = (
-        "review-a"
-        if len(a) < len(cases)
-        else "review-b"
-        if len(b) < len(cases)
-        else "adjudicator"
-        if len(decisions) < len(cases)
-        else "finalize"
-    )
+    review_report = check_reviews(cases, a, b)
+    review_ready = review_report["ready"]
+    review_issues = review_report["issues"]
+    if len(a) < len(cases):
+        next_role = "review-a"
+    elif len(b) < len(cases):
+        next_role = "review-b"
+    elif not review_ready:
+        next_role = "review-remediation"
+    elif len(decisions) < len(cases):
+        next_role = "adjudicator"
+    else:
+        next_role = "finalize"
     _json_stdout(
         {
             "batch_id": layout.root.name,
             **counts,
             "next_role": next_role,
+            "review_ready": review_ready,
+            "review_issues": review_issues,
             "path": str(layout.root),
         }
     )
@@ -430,9 +439,40 @@ def _review_merge(args: argparse.Namespace) -> int:
     blind = read_jsonl(layout.review_blind(slot))
     existing_path = layout.review_complete(slot)
     existing = read_jsonl(existing_path) if existing_path.is_file() else []
+    packet_path = Path(args.packet).expanduser().resolve()
+    packet_dir = layout.review_packet_dir(slot).resolve()
+    try:
+        packet_path.relative_to(packet_dir)
+    except ValueError as exc:
+        raise ValueError(
+            "assigned packet must be under the batch review packet directory"
+        ) from exc
+    packet_name = packet_path.name
+    if not packet_name.endswith(".input.jsonl"):
+        raise ValueError("assigned packet must be an .input.jsonl file")
+    try:
+        packet_number = int(packet_name.split(".", 1)[0])
+    except ValueError as exc:
+        raise ValueError("assigned packet must use a numeric packet name") from exc
+    if packet_path != layout.review_packet(slot, packet_number).resolve():
+        raise ValueError("assigned packet path does not match its slot")
+    packet_rows = read_jsonl(packet_path)
+    result_path = Path(args.packet_result).expanduser().resolve()
+    result_rows = read_jsonl(result_path)
+    packet_audit = validate_review_packet(packet_rows, result_rows, slot=slot)
     result = merge_review_rows(
-        blind, existing, read_jsonl(args.packet_result), slot=slot, output=existing_path
+        blind,
+        existing,
+        result_rows,
+        slot=slot,
+        output=existing_path,
+        packet_rows=packet_rows,
     )
+    receipt = build_review_receipt(
+        packet_path, result_path, slot=slot, packet_audit=packet_audit
+    )
+    receipt_path = layout.review_packet_receipt(slot, packet_number)
+    write_json(receipt_path, receipt)
     validation = validate_review_rows(result, slot=slot)
     validation.pop("_indexed", None)
     write_json(layout.review_validation(slot), validation)
@@ -442,6 +482,7 @@ def _review_merge(args: argparse.Namespace) -> int:
             "slot": slot,
             "rows": len(result),
             "complete": str(existing_path),
+            "receipt": str(receipt_path),
             "validation": validation,
         }
     )
@@ -483,9 +524,7 @@ def _adjudication_packet(args: argparse.Namespace) -> int:
         else []
     )
     evidence = (
-        read_jsonl(layout.source_evidence)
-        if layout.source_evidence.is_file()
-        else []
+        read_jsonl(layout.source_evidence) if layout.source_evidence.is_file() else []
     )
     decisions = (
         read_jsonl(layout.adjudication_partial)
@@ -613,15 +652,25 @@ def _agent_bundle(args: argparse.Namespace) -> int:
     identity = args.reviewer_id or args.adjudicator_id or "YOUR_TRUTHFUL_ID"
     model_family = args.model_family or "YOUR_MODEL_FAMILY"
     template_text = (
-        template_text.replace("<A_OR_B>", role[-1].upper() if role.startswith("review-") else role)
+        template_text.replace(
+            "<A_OR_B>", role[-1].upper() if role.startswith("review-") else role
+        )
         .replace("<BATCH_ID>", layout.root.name)
         .replace("<REVIEWER_ID>", identity)
         .replace("<ADJUDICATOR_ID>", identity)
     )
-    merge_command = (
-        f"numeralform-gold {'review-merge' if role.startswith('review-') else 'adjudication-merge'} "
-        f"--batch {layout.root.name} --packet-result {packet}"
-    )
+    result_packet = packet.with_name(packet.name.replace(".input.", ".result."))
+    if role.startswith("review-"):
+        merge_command = (
+            "numeralform-gold review-merge "
+            f"--batch {layout.root.name} --slot {role[-1].upper()} "
+            f"--packet {packet} --packet-result {result_packet}"
+        )
+    else:
+        merge_command = (
+            "numeralform-gold adjudication-merge "
+            f"--batch {layout.root.name} --packet-result {result_packet}"
+        )
     body = (
         template_text
         + "\n\n## Assigned packet\n\n```jsonl\n"
@@ -709,6 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--batch", required=True)
     merge.add_argument("--slot", choices=("A", "B"), required=True)
     merge.add_argument("--packet-result", type=Path, required=True)
+    merge.add_argument("--packet", type=Path, required=True)
     merge.set_defaults(func=_review_merge)
     check = sub.add_parser("review-check")
     check.add_argument("--batch", required=True)

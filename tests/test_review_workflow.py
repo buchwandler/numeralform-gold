@@ -95,12 +95,23 @@ def test_merge_rejects_mutated_blind_fields_and_is_idempotent(tmp_path: Path):
     case = blind_review_case(candidate(), "A")
     row = completed(case, "A", "review-a", "family-a")
     output = tmp_path / "complete.jsonl"
-    assert merge_review_rows([case], [], [row], slot="A", output=output) == [row]
-    assert merge_review_rows([case], [row], [row], slot="A", output=output) == [row]
+    assert merge_review_rows(
+        [case], [], [row], slot="A", output=output, packet_rows=[case]
+    ) == [row]
+    assert merge_review_rows(
+        [case], [row], [row], slot="A", output=output, packet_rows=[case]
+    ) == [row]
     mutated = dict(row)
     mutated["input"] = {"kind": "integer", "value": "99"}
     with pytest.raises(PacketError):
-        merge_review_rows([case], [], [mutated], slot="A")
+        merge_review_rows([case], [], [mutated], slot="A", packet_rows=[case])
+    with pytest.raises(PacketError, match="assigned packet is required"):
+        merge_review_rows([case], [], [row], slot="A")
+    other_case = blind_review_case(candidate("43"), "A")
+    with pytest.raises(PacketError, match="case-ID sets must match"):
+        merge_review_rows(
+            [case, other_case], [], [row], slot="A", packet_rows=[case, other_case]
+        )
 
 
 def test_anomaly_and_lineage_are_deterministic(tmp_path: Path):

@@ -19,7 +19,9 @@ def _oracle(row: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _digest(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -67,7 +69,12 @@ def build_review_anomaly_report(
         )
 
     rationales = [str(_annotation(row).get("notes") or "") for row in rows]
-    if len(rows) >= substantial_packet_size and rationales and rationales[0] and len(set(rationales)) == 1:
+    if (
+        len(rows) >= substantial_packet_size
+        and rationales
+        and rationales[0]
+        and len(set(rationales)) == 1
+    ):
         add(
             "uniform_rationale",
             notes=rationales[0],
@@ -83,7 +90,11 @@ def build_review_anomaly_report(
         )
 
     accepted_sets = [tuple(_oracle(row).get("accepted", [])) for row in rows]
-    if len(rows) >= substantial_packet_size and accepted_sets and len(set(accepted_sets)) == 1:
+    if (
+        len(rows) >= substantial_packet_size
+        and accepted_sets
+        and len(set(accepted_sets)) == 1
+    ):
         add(
             "uniform_accepted_set",
             case_ids=[row.get("case_id") for row in rows],
@@ -109,7 +120,9 @@ def build_review_anomaly_report(
             blocks=True,
         )
 
-    languages = {row.get("language") for row in rows if isinstance(row.get("language"), str)}
+    languages = {
+        row.get("language") for row in rows if isinstance(row.get("language"), str)
+    }
     if len(languages) > 1:
         add(
             "mixed_language_packet",
@@ -118,8 +131,12 @@ def build_review_anomaly_report(
             blocks=True,
         )
 
-    if statuses and set(statuses) == {"invalid_request"} and any(
-        isinstance(row.get("grammar"), Mapping) and row["grammar"] for row in rows
+    if (
+        statuses
+        and set(statuses) == {"invalid_request"}
+        and any(
+            isinstance(row.get("grammar"), Mapping) and row["grammar"] for row in rows
+        )
     ):
         add(
             "grammar_rows_all_invalid_request",
@@ -133,7 +150,8 @@ def build_review_anomaly_report(
         if isinstance(row.get("case_id"), str)
     }
     if source_outputs and all(
-        case_id in source_outputs and _oracle(row).get("canonical") == source_outputs[case_id]
+        case_id in source_outputs
+        and _oracle(row).get("canonical") == source_outputs[case_id]
         for case_id, row in zip((row.get("case_id") for row in rows), rows)
     ):
         add(

@@ -7,6 +7,7 @@ The MVP separates **import** from **canonical promotion**.
 `import-uninum` writes source-backed candidate rows to the external work root.
 The command validates structure and deterministic identity, but it does not
 rewrite `data/corpus/`.
+
 ## Review workflow
 
 Imported candidates remain quarantine material until they pass:

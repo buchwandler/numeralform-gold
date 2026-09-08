@@ -100,6 +100,7 @@ By default comparison is exact after Unicode NFC normalization. Use
 weaken canonical Gold.
 
 ## What is intentionally not in the MVP
+
 - no automatic promotion of imported or generated rows to Gold;
 - no treating CLDR/ICU or implementation agreement as independent Gold evidence;
 - no bundled upstream datasets;
@@ -124,6 +125,17 @@ import quarantine
 ```
 
 A/B packets contain only semantic, answer-free cases. Batch-owned source evidence, including observed forms, is hidden from reviewers and supplied only to adjudication. Source conflicts are retained as artifacts. Generated CLDR/ICU output remains reference evidence and cannot be promoted by agreement alone.
+
+Review merges are packet-scoped. The merge command must name the assigned input packet as well as the result:
+
+```bash
+numeralform-gold review-merge \
+  --batch uninum-mvp-001 --slot A \
+  --packet ../numeralform-gold-work/batches/uninum-mvp-001/reviews/a/packets/0001.input.jsonl \
+  --packet-result 0001.result.jsonl
+```
+
+The merge requires matching packet and result case IDs, one language, packet limits, and no blocking packet anomaly. It writes a hash receipt beside the input packet. Completed multilingual artifacts are checked per language at the final readiness gate, while a mixed-language individual packet remains blocking. `batch-status` reports `review-remediation` until `review-check` is ready.
 
 Review work is written under the external work root. Canonical corpus changes and durable lineage are written only by explicit finalization and remain subject to the policy in `docs/PROMOTION.md`.
 

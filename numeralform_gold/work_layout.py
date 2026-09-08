@@ -64,7 +64,12 @@ class WorkLayout:
 
     @property
     def lineage(self) -> Path:
-        return Path(__file__).resolve().parents[1] / "data" / "lineage" / "review-evidence.jsonl"
+        return (
+            Path(__file__).resolve().parents[1]
+            / "data"
+            / "lineage"
+            / "review-evidence.jsonl"
+        )
 
     def batch(self, batch_id: str) -> BatchLayout:
         return BatchLayout(self.batches_root / batch_id)
@@ -101,6 +106,7 @@ class BatchLayout:
     @property
     def source_observations(self) -> Path:
         return self.source_dir / "observations.jsonl"
+
     @property
     def source_candidates(self) -> Path:
         return self.source_dir / "candidates.jsonl"
@@ -151,6 +157,9 @@ class BatchLayout:
     ) -> Path:
         suffix = "result" if result else "input"
         return self.review_packet_dir(slot) / f"{packet_number:04d}.{suffix}.jsonl"
+
+    def review_packet_receipt(self, slot: str, packet_number: int) -> Path:
+        return self.review_packet_dir(slot) / f"{packet_number:04d}.receipt.json"
 
     @property
     def review_check(self) -> Path:

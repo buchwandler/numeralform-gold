@@ -26,6 +26,7 @@ def _rows_digest(rows: Iterable[Mapping[str, Any]]) -> str:
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+
 def _candidate_key(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
         candidate.get("language"),
@@ -34,7 +35,6 @@ def _candidate_key(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
         candidate.get("mode"),
         json.dumps(candidate.get("grammar", {}), sort_keys=True),
     )
-
 
 
 def aggregate_candidates(
@@ -54,12 +54,15 @@ def aggregate_candidates(
             if observation not in observations:
                 observations.append(deepcopy(observation))
         if current.get("oracle") != candidate.get("oracle"):
-            conflicts.append({
-                "semantic_key": key,
-                "record_id": current.get("id"),
-                "candidates": [current.get("oracle"), candidate.get("oracle")],
-            })
+            conflicts.append(
+                {
+                    "semantic_key": key,
+                    "record_id": current.get("id"),
+                    "candidates": [current.get("oracle"), candidate.get("oracle")],
+                }
+            )
     return sorted(grouped.values(), key=lambda row: str(row.get("id", ""))), conflicts
+
 
 def _read_corpus(path: str | Path) -> list[dict[str, Any]]:
     target = Path(path)
@@ -139,6 +142,50 @@ def _batch_artifacts(
     return layout, cases, review_a, review_b, decisions, metadata
 
 
+def _review_anomaly_summary(
+    review_rows: Iterable[Mapping[str, Any]],
+    *,
+    slot: str,
+) -> dict[str, Any]:
+    rows = [dict(row) for row in review_rows]
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        language = row.get("language")
+        key = language if isinstance(language, str) and language else "<missing>"
+        grouped[key].append(row)
+
+    per_language: dict[str, dict[str, Any]] = {}
+    signals: list[dict[str, Any]] = []
+    blocking: list[dict[str, Any]] = []
+    for language in sorted(grouped):
+        anomaly = build_review_anomaly_report(grouped[language], slot=slot)
+        per_language[language] = anomaly
+        signals.extend(
+            {"language": language, **signal} for signal in anomaly["signals"]
+        )
+        blocking.extend(
+            {"language": language, **signal} for signal in anomaly["blocking_signals"]
+        )
+
+    if len(grouped) > 1:
+        signals.append(
+            {
+                "code": "mixed_language_review_artifact",
+                "languages": sorted(grouped),
+            }
+        )
+
+    return {
+        "slot": slot,
+        "cases": len(rows),
+        "ready": not blocking,
+        "fresh_review_required": bool(blocking),
+        "signals": signals,
+        "blocking_signals": blocking,
+        "per_language": per_language,
+    }
+
+
 def check_reviews(
     cases: Iterable[Mapping[str, Any]],
     review_a: Iterable[Mapping[str, Any]],
@@ -152,8 +199,8 @@ def check_reviews(
     )
     report = review_preflight(cases_list, review_a_list, review_b_list)
     anomalies = {
-        "A": build_review_anomaly_report(review_a_list, slot="A"),
-        "B": build_review_anomaly_report(review_b_list, slot="B"),
+        "A": _review_anomaly_summary(review_a_list, slot="A"),
+        "B": _review_anomaly_summary(review_b_list, slot="B"),
     }
     issues = list(report["issues"])
     for slot, anomaly in anomalies.items():
@@ -173,7 +220,6 @@ def _source_observation_key(source: Mapping[str, Any]) -> tuple[str, str, str]:
     )
 
 
-
 def _merged_source_observations(
     current: Iterable[Mapping[str, Any]],
     prior: Iterable[Mapping[str, Any]],
@@ -184,6 +230,8 @@ def _merged_source_observations(
             key = _source_observation_key(source)
             merged.setdefault(key, deepcopy(dict(source)))
     return [merged[key] for key in sorted(merged)]
+
+
 def build_accepted_record(
     case: Mapping[str, Any],
     decision: Mapping[str, Any],
@@ -266,7 +314,7 @@ def validate_accepted_decisions(
 def _adjudicator_issues(
     decisions: Iterable[Mapping[str, Any]],
     review: Mapping[str, Any],
- ) -> list[str]:
+) -> list[str]:
     reviewer_ids = {
         review.get("review_a", {}).get("reviewer_id"),
         review.get("review_b", {}).get("reviewer_id"),
@@ -292,16 +340,17 @@ def _adjudicator_issues(
     return issues
 
 
-
 def _decision_validation(
     cases: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
- ) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[str]]:
     try:
         finalize_adjudication(cases, decisions)
     except PacketError as exc:
         return False, [str(exc)]
     return True, []
+
+
 def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str, Any]:
     """Validate a batch without mutating its decisions or canonical corpus."""
     layout, cases, review_a, review_b, decisions, metadata = _batch_artifacts(
@@ -311,7 +360,9 @@ def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str
     review = check_reviews(cases, review_a, review_b)
     case_ids = {case.get("case_id") for case in cases}
     decision_ids = [decision.get("case_id") for decision in decisions]
-    coverage_ok = len(decision_ids) == len(set(decision_ids)) and set(decision_ids) == case_ids
+    coverage_ok = (
+        len(decision_ids) == len(set(decision_ids)) and set(decision_ids) == case_ids
+    )
     invalid_accepts = validate_accepted_decisions(cases, decisions, existing)
     decisions_valid, adjudication_issues = _decision_validation(cases, decisions)
     adjudication_issues.extend(_adjudicator_issues(decisions, review))
@@ -360,7 +411,9 @@ def integrate_batch(
         raise ValueError(str(exc)) from exc
     adjudication_issues = _adjudicator_issues(decisions, review)
     if adjudication_issues:
-        raise ValueError("adjudication independence failed: " + "; ".join(adjudication_issues))
+        raise ValueError(
+            "adjudication independence failed: " + "; ".join(adjudication_issues)
+        )
     existing = _read_corpus(corpus_path)
     existing_map = {
         (

@@ -3,7 +3,19 @@
   "$id": "https://numeralform.gold/schemas/completed-review.schema.json",
   "title": "Numeralform completed blind review",
   "type": "object",
-  "required": ["review_schema_version", "case_id", "reviewer_slot", "language", "input", "mode", "grammar", "family_id", "reviewer", "annotation", "review"],
+  "required": [
+    "review_schema_version",
+    "case_id",
+    "reviewer_slot",
+    "language",
+    "input",
+    "mode",
+    "grammar",
+    "family_id",
+    "reviewer",
+    "annotation",
+    "review"
+  ],
   "properties": {
     "review_schema_version": { "const": "1.0.0" },
     "case_id": { "type": "string", "minLength": 1 },
@@ -39,7 +51,9 @@
       "type": "object",
       "required": ["status", "grammar_assessment"],
       "properties": {
-        "status": { "enum": ["form", "ambiguous", "invalid_request", "capability_blocker"] },
+        "status": {
+          "enum": ["form", "ambiguous", "invalid_request", "capability_blocker"]
+        },
         "oracle": { "type": "object" },
         "grammar_assessment": { "type": "object" },
         "blocker": { "type": "object" },
@@ -50,18 +64,32 @@
     "review": {
       "type": "object",
       "required": ["status"],
-      "properties": { "status": { "enum": ["review_a_complete", "review_b_complete"] } },
+      "properties": {
+        "status": { "enum": ["review_a_complete", "review_b_complete"] }
+      },
       "additionalProperties": true
     }
   },
   "allOf": [
     {
       "if": { "properties": { "reviewer_slot": { "const": "A" } } },
-      "then": { "properties": { "review": { "properties": { "status": { "const": "review_a_complete" } } } } }
+      "then": {
+        "properties": {
+          "review": {
+            "properties": { "status": { "const": "review_a_complete" } }
+          }
+        }
+      }
     },
     {
       "if": { "properties": { "reviewer_slot": { "const": "B" } } },
-      "then": { "properties": { "review": { "properties": { "status": { "const": "review_b_complete" } } } } }
+      "then": {
+        "properties": {
+          "review": {
+            "properties": { "status": { "const": "review_b_complete" } }
+          }
+        }
+      }
     }
   ],
   "additionalProperties": false

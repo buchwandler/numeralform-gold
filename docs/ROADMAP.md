@@ -14,6 +14,7 @@
 - tests and CI
 
 ## P1: corpus construction
+
 - locale mapping registry separate from importer code
 - source census and coverage reports
 - semantic-key aggregation of independent observations

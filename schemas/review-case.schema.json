@@ -3,7 +3,18 @@
   "$id": "https://numeralform.gold/schemas/review-case.schema.json",
   "title": "Numeralform semantic or slot-specific blind review case",
   "type": "object",
-  "required": ["review_schema_version", "case_id", "language", "locale", "input", "mode", "grammar", "family_id", "annotation", "review"],
+  "required": [
+    "review_schema_version",
+    "case_id",
+    "language",
+    "locale",
+    "input",
+    "mode",
+    "grammar",
+    "family_id",
+    "annotation",
+    "review"
+  ],
   "properties": {
     "review_schema_version": { "const": "1.0.0" },
     "case_id": { "type": "string", "minLength": 1 },
@@ -26,7 +37,11 @@
     "review": {
       "type": "object",
       "required": ["status"],
-      "properties": { "status": { "enum": ["unreviewed", "review_a_complete", "review_b_complete"] } },
+      "properties": {
+        "status": {
+          "enum": ["unreviewed", "review_a_complete", "review_b_complete"]
+        }
+      },
       "additionalProperties": true
     }
   },
