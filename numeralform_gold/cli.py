@@ -27,11 +27,16 @@ from .packets import (
     merge_review_rows,
     review_packet_rows,
 )
-from .review import blind_review_case
+from .review import blind_review_case, neutral_review_case, validate_review_rows
 from .source_cache import verify_source_cache
 from .validate import validate_records
 from .work_layout import BatchLayout, WorkLayout
-from .workflow import batch_preflight, check_reviews, finalize_batch
+from .workflow import (
+    aggregate_candidates,
+    batch_preflight,
+    check_reviews,
+    finalize_batch,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_MANIFEST = REPO_ROOT / "sources" / "manifest.json"
@@ -255,24 +260,62 @@ def _coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_batch_candidates(candidates: list[dict[str, Any]]) -> None:
+    if not candidates:
+        raise ValueError("batch requires at least one candidate")
+    report = validate_records(candidates)
+    if report["errors"]:
+        raise ValueError("invalid candidates: " + json.dumps(report["issues"], ensure_ascii=False))
+    ids = [row["id"] for row in candidates]
+    if len(ids) != len(set(ids)):
+        raise ValueError("batch candidates contain duplicate record IDs")
+    case_ids = [neutral_review_case(row)["case_id"] for row in candidates]
+    if len(case_ids) != len(set(case_ids)):
+        raise ValueError("batch candidates contain duplicate semantic case IDs")
+    if any(not row.get("source_observations") for row in candidates):
+        raise ValueError("every candidate must contain source observations")
+
+
+
 def _batch_create(args: argparse.Namespace) -> int:
     work = _work(args)
     layout = work.batch(args.batch)
     if layout.metadata.exists():
         raise ValueError(f"batch already exists: {layout.root}")
-    candidates = read_jsonl(args.candidates)
-    candidates = sorted(candidates, key=lambda row: str(row.get("id", "")))[
-        : args.limit
-    ]
+    raw_candidates = read_jsonl(args.candidates)
+    _validate_batch_candidates(raw_candidates)
+    aggregated, conflicts = aggregate_candidates(raw_candidates)
+    candidates = aggregated[: args.limit]
+    if args.limit <= 0:
+        raise ValueError("batch limit must be positive")
+    _validate_batch_candidates(candidates)
     layout.init()
-    cases = [blind_review_case(candidate, "A") for candidate in candidates]
+    cases = [neutral_review_case(candidate) for candidate in candidates]
+    review_a = [blind_review_case(candidate, "A") for candidate in candidates]
+    review_b = [blind_review_case(candidate, "B") for candidate in candidates]
     source_rows = [
         {"case_id": case["case_id"], "observation": source}
         for case, candidate in zip(cases, candidates)
         for source in candidate.get("source_observations", [])
     ]
+    evidence_rows = [
+        {
+            "case_id": case["case_id"],
+            "candidate_id": candidate["id"],
+            "candidate_quality": candidate.get("quality"),
+            "observed_oracle": candidate.get("oracle"),
+            "source_observations": candidate.get("source_observations", []),
+            "conflict": any(item.get("record_id") == candidate.get("id") for item in conflicts),
+        }
+        for case, candidate in zip(cases, candidates)
+    ]
     write_jsonl(layout.cases, cases)
+    write_jsonl(layout.review_blind("A"), review_a)
+    write_jsonl(layout.review_blind("B"), review_b)
+    write_jsonl(layout.source_candidates, candidates)
     write_jsonl(layout.source_observations, source_rows)
+    write_jsonl(layout.source_evidence, evidence_rows)
+    write_jsonl(layout.source_conflicts, conflicts)
     write_json(
         layout.metadata,
         {
@@ -280,12 +323,20 @@ def _batch_create(args: argparse.Namespace) -> int:
             "state": "created",
             "candidate_count": len(cases),
             "candidate_snapshot_sha256": _rows_digest(candidates),
+            "aggregated_candidates": len(aggregated),
+            "source_conflicts": len(conflicts),
         },
     )
     _json_stdout(
-        {"batch_id": args.batch, "batch": str(layout.root), "cases": len(cases)}
+        {
+            "batch_id": args.batch,
+            "batch": str(layout.root),
+            "cases": len(cases),
+            "source_conflicts": len(conflicts),
+        }
     )
     return 0
+
 
 
 def _rows_digest(rows: Any) -> str:
@@ -295,6 +346,7 @@ def _rows_digest(rows: Any) -> str:
         rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 
 def _batch_status(args: argparse.Namespace) -> int:
@@ -348,7 +400,7 @@ def _batch_status(args: argparse.Namespace) -> int:
 def _review_packet(args: argparse.Namespace) -> int:
     layout = _batch(args)
     slot = args.slot.upper()
-    blind = read_jsonl(layout.cases)
+    blind = read_jsonl(layout.review_blind(slot))
     complete_path = layout.review_complete(slot)
     complete = read_jsonl(complete_path) if complete_path.is_file() else []
     rows = review_packet_rows(
@@ -375,22 +427,22 @@ def _review_packet(args: argparse.Namespace) -> int:
 def _review_merge(args: argparse.Namespace) -> int:
     layout = _batch(args)
     slot = args.slot.upper()
-    blind = read_jsonl(layout.cases)
+    blind = read_jsonl(layout.review_blind(slot))
     existing_path = layout.review_complete(slot)
     existing = read_jsonl(existing_path) if existing_path.is_file() else []
     result = merge_review_rows(
         blind, existing, read_jsonl(args.packet_result), slot=slot, output=existing_path
     )
-    write_json(
-        layout.review_validation(slot),
-        {"slot": slot, "rows": len(result), "complete": len(result)},
-    )
+    validation = validate_review_rows(result, slot=slot)
+    validation.pop("_indexed", None)
+    write_json(layout.review_validation(slot), validation)
     _json_stdout(
         {
             "batch_id": layout.root.name,
             "slot": slot,
             "rows": len(result),
             "complete": str(existing_path),
+            "validation": validation,
         }
     )
     return 0
@@ -430,6 +482,11 @@ def _adjudication_packet(args: argparse.Namespace) -> int:
         if layout.source_observations.is_file()
         else []
     )
+    evidence = (
+        read_jsonl(layout.source_evidence)
+        if layout.source_evidence.is_file()
+        else []
+    )
     decisions = (
         read_jsonl(layout.adjudication_partial)
         if layout.adjudication_partial.is_file()
@@ -444,6 +501,7 @@ def _adjudication_packet(args: argparse.Namespace) -> int:
         decisions,
         max_cases=args.max_cases,
         max_bytes=args.max_bytes,
+        source_evidence=evidence,
     )
     packet_number = (
         len(list(layout.adjudication_dir.joinpath("packets").glob("*.input.jsonl"))) + 1
@@ -487,8 +545,9 @@ def _batch_preflight(args: argparse.Namespace) -> int:
 
 
 def _batch_finalize(args: argparse.Namespace) -> int:
+    lineage = args.lineage or REPO_ROOT / "data" / "lineage" / "review-evidence.jsonl"
     report = finalize_batch(
-        _batch(args).root, args.corpus, write=args.write, lineage_path=args.lineage
+        _batch(args).root, args.corpus, write=args.write, lineage_path=lineage
     )
     _json_stdout(report)
     return 0
@@ -499,7 +558,7 @@ def _agent_bundle(args: argparse.Namespace) -> int:
     role = args.role.lower()
     if role in {"review-a", "review-b"}:
         slot = role[-1].upper()
-        blind = read_jsonl(layout.cases)
+        blind = read_jsonl(layout.review_blind(slot))
         complete_path = layout.review_complete(slot)
         complete = read_jsonl(complete_path) if complete_path.is_file() else []
         rows = review_packet_rows(
@@ -521,6 +580,11 @@ def _agent_bundle(args: argparse.Namespace) -> int:
             if layout.source_observations.is_file()
             else []
         )
+        evidence = (
+            read_jsonl(layout.source_evidence)
+            if layout.source_evidence.is_file()
+            else []
+        )
         partial = (
             read_jsonl(layout.adjudication_partial)
             if layout.adjudication_partial.is_file()
@@ -535,6 +599,7 @@ def _agent_bundle(args: argparse.Namespace) -> int:
             partial,
             max_cases=args.max_cases,
             max_bytes=args.max_bytes,
+            source_evidence=evidence,
         )
         packet = layout.adjudication_packet(
             len(list(layout.adjudication_dir.joinpath("packets").glob("*.input.jsonl")))
@@ -544,11 +609,27 @@ def _agent_bundle(args: argparse.Namespace) -> int:
         template = REPO_ROOT / "templates" / "adjudicator-task.md"
     else:
         raise ValueError("role must be review-a, review-b, or adjudicator")
+    template_text = template.read_text(encoding="utf-8")
+    identity = args.reviewer_id or args.adjudicator_id or "YOUR_TRUTHFUL_ID"
+    model_family = args.model_family or "YOUR_MODEL_FAMILY"
+    template_text = (
+        template_text.replace("<A_OR_B>", role[-1].upper() if role.startswith("review-") else role)
+        .replace("<BATCH_ID>", layout.root.name)
+        .replace("<REVIEWER_ID>", identity)
+        .replace("<ADJUDICATOR_ID>", identity)
+    )
+    merge_command = (
+        f"numeralform-gold {'review-merge' if role.startswith('review-') else 'adjudication-merge'} "
+        f"--batch {layout.root.name} --packet-result {packet}"
+    )
     body = (
-        template.read_text(encoding="utf-8")
+        template_text
         + "\n\n## Assigned packet\n\n```jsonl\n"
         + packet.read_text(encoding="utf-8")
-        + "```\n"
+        + "```\n\n"
+        + f"Expected output: save completed rows to {packet.with_name(packet.name.replace('.input.', '.result.'))}.\n"
+        + f"Merge command: {merge_command}\n"
+        + f"Declared model family: {model_family}\n"
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(body, encoding="utf-8")
@@ -660,6 +741,9 @@ def build_parser() -> argparse.ArgumentParser:
     bundle.add_argument("--out", type=Path, required=True)
     bundle.add_argument("--max-cases", type=int, default=50)
     bundle.add_argument("--max-bytes", type=int, default=65536)
+    bundle.add_argument("--reviewer-id")
+    bundle.add_argument("--adjudicator-id")
+    bundle.add_argument("--model-family")
     bundle.set_defaults(func=_agent_bundle)
     return parser
 

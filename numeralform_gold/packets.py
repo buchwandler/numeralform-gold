@@ -50,6 +50,15 @@ def select_packet_rows(
         (dict(row) for row in rows), key=lambda row: str(row.get(identity_field, ""))
     )
     selected_language: str | None = language
+    if selected_language is None:
+        selected_language = next(
+            (
+                row.get("language")
+                for row in ordered
+                if isinstance(row.get("language"), str)
+            ),
+            None,
+        )
     for row in ordered:
         identity = row.get(identity_field)
         if not isinstance(identity, str) or not identity:
@@ -57,12 +66,10 @@ def select_packet_rows(
         if identity in completed:
             continue
         row_language = row.get("language")
-        if selected_language is None and isinstance(row_language, str):
-            selected_language = row_language
         if language is not None and row_language != language:
             continue
         if selected_language is not None and row_language != selected_language:
-            break
+            continue
         if len(selected) >= max_cases:
             break
         row_bytes = serialized_row_bytes(row)
@@ -104,6 +111,9 @@ def _without_forbidden(value: Any) -> Any:
                 "canonical_output",
                 "canonical_answer",
                 "canonical_record",
+                "source_evidence",
+                "observed_oracle",
+                "candidate_oracle",
             }
         }
     if isinstance(value, list):
@@ -219,6 +229,15 @@ def _source_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, A
     return result
 
 
+
+def _evidence_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        case_id = row.get("case_id")
+        if isinstance(case_id, str):
+            result.setdefault(case_id, []).append(_public(row))
+    return result
+
 def adjudication_packet_rows(
     cases: Iterable[Mapping[str, Any]],
     review_a: Iterable[Mapping[str, Any]],
@@ -229,6 +248,7 @@ def adjudication_packet_rows(
     *,
     max_cases: int = ADJUDICATION_PACKET_MAX_CASES,
     max_bytes: int = ADJUDICATION_PACKET_MAX_BYTES,
+    source_evidence: Iterable[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Project aligned reviews and selected evidence for adjudication."""
     case_map = _indexed_unique(cases, "case")
@@ -238,6 +258,7 @@ def adjudication_packet_rows(
         raise PacketError("cases, review A, and review B case-ID sets must match")
     source_map = _source_map(source_observations)
     reference_map = _source_map(reference_observations)
+    evidence_map = _evidence_map(source_evidence)
     projected: list[dict[str, Any]] = []
     for case_id in sorted(case_map):
         case = case_map[case_id]
@@ -250,6 +271,7 @@ def adjudication_packet_rows(
             "review_b": b_map[case_id],
             "source_observations": _public_list(sources),
             "reference_observations": _public_list(references),
+            "source_evidence": _public_list(evidence_map.get(case_id, [])),
         }
         projected.append(row)
     completed_ids = [

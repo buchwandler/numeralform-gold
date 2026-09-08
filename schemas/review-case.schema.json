@@ -1,21 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://numeralform.gold/schemas/review-case.schema.json",
-  "title": "Numeralform blind review case",
+  "title": "Numeralform semantic or slot-specific blind review case",
   "type": "object",
-  "required": [
-    "review_schema_version",
-    "case_id",
-    "language",
-    "locale",
-    "input",
-    "mode",
-    "grammar",
-    "family_id",
-    "reviewer_slot",
-    "annotation",
-    "review"
-  ],
+  "required": ["review_schema_version", "case_id", "language", "locale", "input", "mode", "grammar", "family_id", "annotation", "review"],
   "properties": {
     "review_schema_version": { "const": "1.0.0" },
     "case_id": { "type": "string", "minLength": 1 },
@@ -25,12 +13,12 @@
       "type": "object",
       "required": ["kind", "value"],
       "properties": {
-        "kind": { "const": "integer" },
+        "kind": { "enum": ["integer", "decimal", "fraction"] },
         "value": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },
-    "mode": { "const": "cardinal" },
+    "mode": { "type": "string", "minLength": 1 },
     "grammar": { "type": "object" },
     "family_id": { "type": "string", "minLength": 1 },
     "reviewer_slot": { "enum": ["A", "B"] },
@@ -38,7 +26,7 @@
     "review": {
       "type": "object",
       "required": ["status"],
-      "properties": { "status": { "const": "unreviewed" } },
+      "properties": { "status": { "enum": ["unreviewed", "review_a_complete", "review_b_complete"] } },
       "additionalProperties": true
     }
   },

@@ -64,7 +64,7 @@ class WorkLayout:
 
     @property
     def lineage(self) -> Path:
-        return self.root.parent.parent / "data" / "lineage" / "review-evidence.jsonl"
+        return Path(__file__).resolve().parents[1] / "data" / "lineage" / "review-evidence.jsonl"
 
     def batch(self, batch_id: str) -> BatchLayout:
         return BatchLayout(self.batches_root / batch_id)
@@ -101,6 +101,17 @@ class BatchLayout:
     @property
     def source_observations(self) -> Path:
         return self.source_dir / "observations.jsonl"
+    @property
+    def source_candidates(self) -> Path:
+        return self.source_dir / "candidates.jsonl"
+
+    @property
+    def source_evidence(self) -> Path:
+        return self.source_dir / "evidence.jsonl"
+
+    @property
+    def source_conflicts(self) -> Path:
+        return self.source_dir / "conflicts.jsonl"
 
     @property
     def source_references(self) -> Path:

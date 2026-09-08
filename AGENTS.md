@@ -39,7 +39,4 @@ observation has its own source identity.
    explicit review/promotion change
 
 ## MVP limitation
-
-The MVP contains no full A/B reviewer/adjudication harness. Do not simulate one
-by bulk-marking generated data as Gold. Extend the review pipeline before large
-scale promotion.
+The review workflow now provides independent A/B packets, adjudication, preflight, and explicit finalization. Do not bypass those gates by bulk-marking generated or imported data as Gold.

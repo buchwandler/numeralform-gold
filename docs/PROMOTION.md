@@ -7,6 +7,17 @@ The MVP separates **import** from **canonical promotion**.
 `import-uninum` writes source-backed candidate rows to the external work root.
 The command validates structure and deterministic identity, but it does not
 rewrite `data/corpus/`.
+## Review workflow
+
+Imported candidates remain quarantine material until they pass:
+
+1. slot-specific independent review A and review B;
+2. deterministic review-check with distinct reviewer IDs and model families;
+3. adjudication using only the adjudicator-visible source evidence;
+4. batch preflight and dry-run finalization;
+5. explicit `batch-finalize --write`.
+
+Reviewer packets never contain source-observed forms, implementation predictions, or other answerful fields. Source evidence and conflicts are retained in the external batch and durable lineage records.
 
 ## Promotion in v0.1
 

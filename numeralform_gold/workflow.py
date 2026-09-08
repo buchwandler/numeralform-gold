@@ -26,6 +26,40 @@ def _rows_digest(rows: Iterable[Mapping[str, Any]]) -> str:
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+def _candidate_key(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        candidate.get("language"),
+        candidate.get("locale"),
+        json.dumps(candidate.get("input"), sort_keys=True),
+        candidate.get("mode"),
+        json.dumps(candidate.get("grammar", {}), sort_keys=True),
+    )
+
+
+
+def aggregate_candidates(
+    candidates: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Merge independent observations that share one semantic request."""
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    conflicts: list[dict[str, Any]] = []
+    for candidate in candidates:
+        key = _candidate_key(candidate)
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = deepcopy(dict(candidate))
+            continue
+        observations = current.setdefault("source_observations", [])
+        for observation in candidate.get("source_observations", []):
+            if observation not in observations:
+                observations.append(deepcopy(observation))
+        if current.get("oracle") != candidate.get("oracle"):
+            conflicts.append({
+                "semantic_key": key,
+                "record_id": current.get("id"),
+                "candidates": [current.get("oracle"), candidate.get("oracle")],
+            })
+    return sorted(grouped.values(), key=lambda row: str(row.get("id", ""))), conflicts
 
 def _read_corpus(path: str | Path) -> list[dict[str, Any]]:
     target = Path(path)
@@ -123,7 +157,7 @@ def check_reviews(
     }
     issues = list(report["issues"])
     for slot, anomaly in anomalies.items():
-        if anomaly["fresh_review_required"]:
+        if anomaly["blocking_signals"]:
             issues.append(f"review {slot}: anomaly requires fresh review")
     report["anomalies"] = anomalies
     report["issues"] = sorted(set(issues))
@@ -131,6 +165,25 @@ def check_reviews(
     return report
 
 
+def _source_observation_key(source: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(source.get("benchmark", "")),
+        str(source.get("source_id", "")),
+        str(source.get("source_version", "")),
+    )
+
+
+
+def _merged_source_observations(
+    current: Iterable[Mapping[str, Any]],
+    prior: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for source in [*prior, *current]:
+        if isinstance(source, Mapping):
+            key = _source_observation_key(source)
+            merged.setdefault(key, deepcopy(dict(source)))
+    return [merged[key] for key in sorted(merged)]
 def build_accepted_record(
     case: Mapping[str, Any],
     decision: Mapping[str, Any],
@@ -140,7 +193,10 @@ def build_accepted_record(
     oracle = decision.get("final_oracle")
     if not isinstance(oracle, Mapping):
         raise TypeError(f"{case.get('case_id')}: accept decision requires final_oracle")
-    source_observations = deepcopy(case.get("source_observations", []))
+    source_observations = _merged_source_observations(
+        case.get("source_observations", []),
+        existing.get("source_observations", []) if existing else [],
+    )
     if not isinstance(source_observations, list) or not source_observations:
         raise ValueError(
             f"{case.get('case_id')}: accepted record requires source observations"
@@ -207,6 +263,45 @@ def validate_accepted_decisions(
     return diagnostics
 
 
+def _adjudicator_issues(
+    decisions: Iterable[Mapping[str, Any]],
+    review: Mapping[str, Any],
+ ) -> list[str]:
+    reviewer_ids = {
+        review.get("review_a", {}).get("reviewer_id"),
+        review.get("review_b", {}).get("reviewer_id"),
+    } - {None}
+    reviewer_families = {
+        review.get("review_a", {}).get("model_family"),
+        review.get("review_b", {}).get("model_family"),
+    } - {None}
+    issues: list[str] = []
+    adjudicator_ids: set[str] = set()
+    adjudicator_families: set[str] = set()
+    for row in decisions:
+        identity = row.get("adjudicator")
+        if isinstance(identity, Mapping):
+            if isinstance(identity.get("adjudicator_id"), str):
+                adjudicator_ids.add(identity["adjudicator_id"])
+            if isinstance(identity.get("model_family"), str):
+                adjudicator_families.add(identity["model_family"])
+    if adjudicator_ids & reviewer_ids:
+        issues.append("adjudicator_id must differ from reviewer IDs")
+    if adjudicator_families & reviewer_families:
+        issues.append("adjudicator model_family must differ from reviewer families")
+    return issues
+
+
+
+def _decision_validation(
+    cases: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+ ) -> tuple[bool, list[str]]:
+    try:
+        finalize_adjudication(cases, decisions)
+    except PacketError as exc:
+        return False, [str(exc)]
+    return True, []
 def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str, Any]:
     """Validate a batch without mutating its decisions or canonical corpus."""
     layout, cases, review_a, review_b, decisions, metadata = _batch_artifacts(
@@ -216,14 +311,20 @@ def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str
     review = check_reviews(cases, review_a, review_b)
     case_ids = {case.get("case_id") for case in cases}
     decision_ids = [decision.get("case_id") for decision in decisions]
-    coverage_ok = (
-        len(decision_ids) == len(set(decision_ids)) and set(decision_ids) == case_ids
-    )
-    invalid = validate_accepted_decisions(cases, decisions, existing)
+    coverage_ok = len(decision_ids) == len(set(decision_ids)) and set(decision_ids) == case_ids
+    invalid_accepts = validate_accepted_decisions(cases, decisions, existing)
+    decisions_valid, adjudication_issues = _decision_validation(cases, decisions)
+    adjudication_issues.extend(_adjudicator_issues(decisions, review))
     accepted = sum(row.get("decision") == "accept" for row in decisions)
     excluded = sum(row.get("decision") == "exclude" for row in decisions)
     unresolved = sum(row.get("decision") == "unresolved" for row in decisions)
-    ready = bool(review["ready"] and coverage_ok and not invalid)
+    ready = bool(
+        review["ready"]
+        and coverage_ok
+        and not invalid_accepts
+        and decisions_valid
+        and not adjudication_issues,
+    )
     return {
         "batch_id": metadata.get("batch_id", layout.root.name),
         "cases": len(cases),
@@ -232,7 +333,8 @@ def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str
         "accept": accepted,
         "exclude": excluded,
         "unresolved": unresolved,
-        "invalid_accepts": invalid,
+        "invalid_accepts": invalid_accepts,
+        "adjudication_issues": adjudication_issues,
         "ready_to_finalize": ready,
         "review_issues": review["issues"],
     }
@@ -256,6 +358,9 @@ def integrate_batch(
         decisions = finalize_adjudication(cases, decisions)
     except PacketError as exc:
         raise ValueError(str(exc)) from exc
+    adjudication_issues = _adjudicator_issues(decisions, review)
+    if adjudication_issues:
+        raise ValueError("adjudication independence failed: " + "; ".join(adjudication_issues))
     existing = _read_corpus(corpus_path)
     existing_map = {
         (
@@ -323,8 +428,8 @@ def integrate_batch(
     }
     if write:
         _write_corpus(corpus_path, combined.values())
-        write_jsonl(layout.integration_exclusions, excluded)
-        write_jsonl(layout.integration_retry, retry)
+        target_lineage = Path(lineage_path) if lineage_path else layout.lineage
+        previous = read_jsonl(target_lineage) if target_lineage.is_file() else []
         entries = build_review_evidence(
             cases,
             review_a,
@@ -335,12 +440,16 @@ def integrate_batch(
             campaign_id=metadata.get("campaign_id"),
             batch_id=str(metadata.get("batch_id", layout.root.name)),
             integration_revision=_rows_digest(final_records),
+            previous=previous,
         )
-        target_lineage = (
-            Path(lineage_path)
-            if lineage_path
-            else Path("data/lineage/review-evidence.jsonl")
+        conflicts = (
+            read_jsonl(layout.source_conflicts)
+            if layout.source_conflicts.is_file()
+            else []
         )
+        write_jsonl(layout.integration_exclusions, excluded)
+        write_jsonl(layout.integration_retry, retry)
+        write_jsonl(layout.integration_dir / "conflicts.jsonl", conflicts)
         write_review_evidence(target_lineage, entries)
         write_json(
             layout.integration_summary,
@@ -349,9 +458,11 @@ def integrate_batch(
                 "state": "integrated",
                 "decision_sha256": _rows_digest(decisions),
                 "case_sha256": _rows_digest(cases),
+                "source_conflicts": len(conflicts),
             },
         )
         result["lineage"] = str(target_lineage)
+        result["source_conflicts"] = conflicts
     return result
 
 
@@ -383,6 +494,7 @@ def finalize_batch(
 
 
 __all__ = [
+    "aggregate_candidates",
     "batch_preflight",
     "build_accepted_record",
     "check_reviews",

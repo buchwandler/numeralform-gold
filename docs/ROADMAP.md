@@ -14,14 +14,13 @@
 - tests and CI
 
 ## P1: corpus construction
-
 - locale mapping registry separate from importer code
 - source census and coverage reports
-- Numeralbank/Chan importers
-- merge independent observations by semantic key
-- conflict reports
+- semantic-key aggregation of independent observations
+- explicit source conflict artifacts
 - reviewed promotion command
 - canonical language shards under `data/corpus/`
+- independent A/B review, adjudication, preflight, and durable lineage
 
 ## P2: grammar Gold
 
@@ -30,7 +29,7 @@
 - evaluate `unicode-rbnf` ruleset exposure as a non-Gold discovery/reference adapter
 - case/gender/number paradigms
 - contextual source importers (Polish/Russian/etc.)
-- A/B blind review + adjudication, adapted from spokenform-gold
+- grammar-sensitive A/B review follows the same source-evidence boundary
 - negative/rejected forms for high-value morphology regressions
 
 ## P3: exhaustive validation

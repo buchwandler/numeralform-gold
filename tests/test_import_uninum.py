@@ -20,7 +20,7 @@ def test_import_uninum_is_deterministic_and_maps_mvp_locales():
     )
     assert forty_two["oracle"]["canonical"] == "forty two"
     assert forty_two["grammar"] == {"context": "citation"}
-    assert forty_two["quality"] == "gold"
+    assert forty_two["quality"] == "quarantine"
     assert forty_two["source_observations"][0]["role"] == "gold_anchor"
     assert validate_records(first)["errors"] == 0
 

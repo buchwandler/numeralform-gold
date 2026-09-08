@@ -100,11 +100,31 @@ By default comparison is exact after Unicode NFC normalization. Use
 weaken canonical Gold.
 
 ## What is intentionally not in the MVP
-
-- no automatic promotion of CLDR-generated rows to Gold;
-- no claim that UniNum validates inflected/case-sensitive forms;
-- no complete review campaign/adjudication subsystem yet;
+- no automatic promotion of imported or generated rows to Gold;
+- no treating CLDR/ICU or implementation agreement as independent Gold evidence;
 - no bundled upstream datasets;
 - no coupling to `num2words`.
+
+## Review and promotion workflow
+
+The implemented review pipeline is:
+
+```text
+import quarantine
+→ aggregate candidate evidence
+→ batch-create
+→ review A
+→ review B
+→ review-check
+→ adjudication
+→ batch-preflight
+→ dry-run batch-finalize
+→ explicit batch-finalize --write
+→ canonical corpus + lineage
+```
+
+A/B packets contain only semantic, answer-free cases. Batch-owned source evidence, including observed forms, is hidden from reviewers and supplied only to adjudication. Source conflicts are retained as artifacts. Generated CLDR/ICU output remains reference evidence and cannot be promoted by agreement alone.
+
+Review work is written under the external work root. Canonical corpus changes and durable lineage are written only by explicit finalization and remain subject to the policy in `docs/PROMOTION.md`.
 
 See `docs/ROADMAP.md` for the next implementation steps.

@@ -22,7 +22,7 @@
     "review_a": { "type": "object" },
     "review_b": { "type": "object" },
     "adjudication": { "type": "object" },
-    "decision": { "enum": ["accept", "exclude", "unresolved"] },
+    "decision": { "const": "accept" },
     "protocol_version": { "const": "numeral-review-v1" }
   },
   "additionalProperties": true

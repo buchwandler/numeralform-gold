@@ -30,6 +30,9 @@ FORBIDDEN_BLIND_KEYS = {
     "canonical_output",
     "canonical_answer",
     "canonical_record",
+    "source_evidence",
+    "observed_oracle",
+    "candidate_oracle",
 }
 
 
@@ -93,6 +96,13 @@ def blind_review_case(record: Mapping[str, Any], reviewer_slot: str) -> dict[str
     assert_blind_safe(case)
     return case
 
+
+
+def neutral_review_case(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a candidate into a slot-independent semantic review case."""
+    case = blind_review_case(record, "A")
+    case.pop("reviewer_slot", None)
+    return case
 
 def review_case(record: Mapping[str, Any], reviewer_slot: str) -> dict[str, Any]:
     """Backward-compatible alias for :func:`blind_review_case`."""
@@ -436,6 +446,7 @@ __all__ = [
     "case_id_for_record",
     "compare_reviews",
     "hidden_field_paths",
+    "neutral_review_case",
     "review_case",
     "review_preflight",
     "reviewer_model_family",

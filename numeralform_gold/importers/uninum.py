@@ -97,7 +97,7 @@ def import_uninum(
     *,
     codes: set[str] | None = None,
     languages: set[str] | None = None,
-    quality: str = "gold",
+    quality: str = "quarantine",
 ) -> list[dict[str, Any]]:
     """Return deterministic records from a pinned UniNum checkout."""
 
