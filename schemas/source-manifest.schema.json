@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Numeralform Gold source manifest",
+  "type": "object",
+  "required": ["schema_version", "sources"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "role",
+          "source_url",
+          "clone_url",
+          "revision",
+          "license",
+          "redistribution",
+          "expected_paths"
+        ],
+        "properties": {
+          "name": { "type": "string" },
+          "role": {
+            "enum": ["gold_anchor", "generated_reference", "contextual_gold"]
+          },
+          "source_url": { "type": "string" },
+          "clone_url": { "type": "string" },
+          "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "tag": { "type": "string" },
+          "license": { "type": "string" },
+          "redistribution": {
+            "enum": ["external_cache", "embedded_public", "external_ref_only"]
+          },
+          "expected_paths": { "type": "array", "items": { "type": "string" } },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

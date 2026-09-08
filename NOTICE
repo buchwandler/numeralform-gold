@@ -1,0 +1,5 @@
+numeralform-gold is independent benchmark/tooling infrastructure.
+
+Upstream datasets and standards are not relicensed by this repository. See
+sources/manifest.json and docs/SOURCES.md. The source cache is external and is
+not included in releases by default.

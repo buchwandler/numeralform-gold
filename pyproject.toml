@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "numeralform-gold"
+version = "0.1.0"
+description = "Gold and reference corpus tooling for multilingual number-to-words validation"
+requires-python = ">=3.10"
+dependencies = [
+  "tomli>=2.0.1; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.16,<0.17",
+]
+icu = [
+  "icu-rbnf==0.1.0",
+]
+
+[project.scripts]
+numeralform-gold = "numeralform_gold.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88

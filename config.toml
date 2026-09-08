@@ -1,0 +1,3 @@
+[paths]
+source_cache = "../numeralform-gold-source-cache"
+work = "../numeralform-gold-work"

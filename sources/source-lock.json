@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0.0",
+  "sources": {
+    "cldr": {
+      "clone_url": "https://github.com/unicode-org/cldr.git",
+      "revision": "11299982335beb974c1c63c45265184e759c0f41",
+      "sparse_paths": ["common/rbnf/*"],
+      "tag": "release-48-2"
+    },
+    "uninum": {
+      "clone_url": "https://github.com/google-research-datasets/uninum.git",
+      "revision": "b3d9064655a492e5cb71f6237383154d3ba74546",
+      "sparse_paths": ["codes.tsv", "numbers/*"]
+    }
+  }
+}
