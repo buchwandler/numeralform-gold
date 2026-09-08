@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://numeralform.gold/schemas/review-evidence.schema.json",
+  "title": "Numeralform durable review evidence",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "record_id",
+    "campaign_id",
+    "batch_id",
+    "case_id",
+    "decision",
+    "protocol_version"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "record_id": { "type": "string", "minLength": 1 },
+    "campaign_id": { "type": ["string", "null"] },
+    "batch_id": { "type": "string", "minLength": 1 },
+    "case_id": { "type": "string", "minLength": 1 },
+    "source_refs": { "type": "array" },
+    "review_a": { "type": "object" },
+    "review_b": { "type": "object" },
+    "adjudication": { "type": "object" },
+    "decision": { "enum": ["accept", "exclude", "unresolved"] },
+    "protocol_version": { "const": "numeral-review-v1" }
+  },
+  "additionalProperties": true
+}

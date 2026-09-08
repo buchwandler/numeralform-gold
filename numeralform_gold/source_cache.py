@@ -26,7 +26,7 @@ def _git_head(path: Path) -> str | None:
 def load_manifest(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("sources"), list):
-        raise ValueError(f"invalid source manifest: {path}")
+        raise TypeError(f"invalid source manifest: {path}")
     return payload
 
 

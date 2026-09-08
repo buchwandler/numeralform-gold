@@ -27,7 +27,7 @@ def compare_predictions(
         record_id = row.get("id")
         output = row.get("output")
         if not isinstance(record_id, str) or not isinstance(output, str):
-            raise ValueError("prediction rows require string id and output")
+            raise TypeError("prediction rows require string id and output")
         if record_id in predictions:
             duplicate_prediction_ids.append(record_id)
         predictions[record_id] = output

@@ -22,7 +22,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
                 continue
             value = json.loads(line)
             if not isinstance(value, dict):
-                raise ValueError(f"{path}:{line_no}: JSONL row must be an object")
+                raise TypeError(f"{path}:{line_no}: JSONL row must be an object")
             rows.append(value)
     return rows
 

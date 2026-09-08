@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://numeralform.gold/schemas/completed-review.schema.json",
+  "title": "Numeralform completed blind review",
+  "type": "object",
+  "required": [
+    "review_schema_version",
+    "case_id",
+    "reviewer_slot",
+    "language",
+    "input",
+    "mode",
+    "grammar",
+    "family_id",
+    "reviewer",
+    "annotation",
+    "review"
+  ],
+  "properties": {
+    "review_schema_version": { "const": "1.0.0" },
+    "case_id": { "type": "string", "minLength": 1 },
+    "reviewer_slot": { "enum": ["A", "B"] },
+    "language": { "type": "string", "minLength": 2 },
+    "locale": { "type": ["string", "null"] },
+    "input": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": { "const": "integer" },
+        "value": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "mode": { "type": "string" },
+    "grammar": { "type": "object" },
+    "family_id": { "type": "string", "minLength": 1 },
+    "reviewer": {
+      "type": "object",
+      "required": ["reviewer_id", "kind", "model_family", "protocol_version"],
+      "properties": {
+        "reviewer_id": { "type": "string", "minLength": 1 },
+        "kind": { "const": "llm" },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "model_family": { "type": "string", "minLength": 1 },
+        "protocol_version": { "const": "numeral-review-v1" }
+      },
+      "additionalProperties": true
+    },
+    "annotation": {
+      "type": "object",
+      "required": ["status", "grammar_assessment"],
+      "properties": {
+        "status": {
+          "enum": ["form", "ambiguous", "invalid_request", "capability_blocker"]
+        },
+        "oracle": { "type": "object" },
+        "grammar_assessment": { "type": "object" },
+        "blocker": { "type": "object" },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "review": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "const": "review_a_complete" } },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

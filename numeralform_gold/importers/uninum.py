@@ -97,6 +97,7 @@ def import_uninum(
     *,
     codes: set[str] | None = None,
     languages: set[str] | None = None,
+    quality: str = "gold",
 ) -> list[dict[str, Any]]:
     """Return deterministic records from a pinned UniNum checkout."""
 
@@ -140,7 +141,7 @@ def import_uninum(
                     form=form,
                     mode="cardinal",
                     grammar={"context": "citation"},
-                    quality="gold",
+                    quality=quality,
                     source_observations=[source],
                     notes="Imported from UniNum as a citation-form Gold anchor.",
                 )

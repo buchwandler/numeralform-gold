@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://numeralform.gold/schemas/adjudication.schema.json",
+  "title": "Numeralform adjudication decision",
+  "type": "object",
+  "required": [
+    "case_id",
+    "adjudicator",
+    "decision",
+    "rationale",
+    "evidence_used"
+  ],
+  "properties": {
+    "case_id": { "type": "string", "minLength": 1 },
+    "adjudicator": {
+      "type": "object",
+      "required": ["adjudicator_id", "model_family"],
+      "properties": {
+        "adjudicator_id": { "type": "string", "minLength": 1 },
+        "model_family": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "decision": { "enum": ["accept", "exclude", "unresolved"] },
+    "final_oracle": {
+      "type": "object",
+      "required": ["canonical", "accepted", "rejected"]
+    },
+    "rationale": { "type": "string" },
+    "evidence_used": { "type": "array", "items": { "type": "string" } },
+    "blocker": {
+      "type": "object",
+      "required": [
+        "code",
+        "class",
+        "reason",
+        "attempted_resolution",
+        "retryable"
+      ]
+    }
+  },
+  "additionalProperties": true
+}
