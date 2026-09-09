@@ -1,7 +1,8 @@
-# Numeralform Gold adjudicator
+# Isolated Numeralform Gold adjudicator task
 
-You are adjudicator `<ADJUDICATOR_ID>` for batch `<BATCH_ID>`. Start only after the deterministic A/B review gate reports ready. Read only the bounded adjudication packet, which contains the selected semantic case, both independent reviews, and selected source/reference evidence.
+TASK_NOT_BOUND
 
-For every case emit exactly one decision: `accept`, `exclude`, or `unresolved`. Accept requires a complete `final_oracle` with canonical, accepted, and rejected values. Unresolved requires a structured retryable blocker with code, class, reason, attempted resolution, and retryable=true. Do not force consensus, and do not reinterpret the semantic request outside the supplied evidence and policy.
+This template is internal and is not a runnable adjudicator assignment. If the generated assignment manifest and bounded input are absent, stop immediately with exactly `TASK_NOT_BOUND`. Do not inspect the repository, work root, source cache, previous reviews, canonical corpus, or any other filesystem path.
 
-Preserve case identity and truthful adjudicator metadata. Return only the decision JSONL artifact and merge it with the repository command.
+When a generated assignment is present, read only the embedded assignment manifest and bounded adjudication input. Preserve every `case_id` and use only the supplied evidence.
+Return only `result.jsonl` with one decision per assigned case. Do not run commands or perform file discovery. Accept requires a complete final oracle. Unresolved requires a retryable structured blocker. Do not force consensus or invent evidence.

@@ -158,6 +158,18 @@ class BatchLayout:
         suffix = "result" if result else "input"
         return self.review_packet_dir(slot) / f"{packet_number:04d}.{suffix}.jsonl"
 
+    def review_assignments(self, slot: str) -> Path:
+        return self.review_dir(slot) / "assignments"
+
+    def review_archive(self, slot: str) -> Path:
+        return self.review_dir(slot) / "archive"
+
+    def review_assignment(self, slot: str, packet_number: int) -> Path:
+        return self.review_assignments(slot) / f"{packet_number:04d}"
+
+    def review_assignment_manifest(self, slot: str, packet_number: int) -> Path:
+        return self.review_assignment(slot, packet_number) / "assignment.json"
+
     def review_packet_receipt(self, slot: str, packet_number: int) -> Path:
         return self.review_packet_dir(slot) / f"{packet_number:04d}.receipt.json"
 
@@ -180,6 +192,23 @@ class BatchLayout:
     def adjudication_packet(self, packet_number: int, result: bool = False) -> Path:
         suffix = "result" if result else "input"
         return self.adjudication_dir / "packets" / f"{packet_number:04d}.{suffix}.jsonl"
+    @property
+    def adjudication_assignments(self) -> Path:
+        return self.adjudication_dir / "assignments"
+
+    @property
+    def adjudication_archive(self) -> Path:
+        return self.adjudication_dir / "archive"
+
+    def adjudication_assignment(self, packet_number: int) -> Path:
+        return self.adjudication_assignments / f"{packet_number:04d}"
+
+    def adjudication_assignment_manifest(self, packet_number: int) -> Path:
+        return self.adjudication_assignment(packet_number) / "assignment.json"
+
+    def adjudication_packet_receipt(self, packet_number: int) -> Path:
+        return self.adjudication_dir / "packets" / f"{packet_number:04d}.receipt.json"
+
 
     @property
     def integration_dir(self) -> Path:
@@ -212,7 +241,13 @@ class BatchLayout:
             self.cases_dir,
             self.review_dir("A"),
             self.review_dir("B"),
+            self.review_assignments("A"),
+            self.review_assignments("B"),
+            self.review_archive("A"),
+            self.review_archive("B"),
             self.adjudication_dir / "packets",
+            self.adjudication_assignments,
+            self.adjudication_archive,
             self.integration_dir,
             self.reports_dir,
         ]

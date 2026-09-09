@@ -12,7 +12,13 @@ from typing import Any
 
 from .io import read_json, read_jsonl, write_json, write_jsonl
 from .model import make_record
-from .packets import PacketError, finalize_adjudication
+from .packets import (
+    PacketError,
+    case_ids_sha256,
+    finalize_adjudication,
+    sha256_file,
+    validate_review_packet,
+)
 from .review import review_preflight
 from .review_anomaly import build_review_anomaly_report
 from .review_lineage import build_review_evidence, write_review_evidence
@@ -63,6 +69,36 @@ def aggregate_candidates(
             )
     return sorted(grouped.values(), key=lambda row: str(row.get("id", ""))), conflicts
 
+
+def shard_candidates(
+    candidates: Iterable[Mapping[str, Any]],
+    *,
+    max_cases: int = 100,
+) -> list[dict[str, Any]]:
+    if max_cases <= 0:
+        raise ValueError("max_cases must be positive")
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in candidates:
+        groups[(
+            str(row.get("language") or "<missing>"),
+            str(row.get("locale") or "<missing>"),
+            str(row.get("family_id") or "<missing>"),
+        )].append(dict(row))
+    shards: list[dict[str, Any]] = []
+    for group in sorted(groups):
+        rows = sorted(groups[group], key=lambda row: str(row.get("id", "")))
+        for offset in range(0, len(rows), max_cases):
+            shards.append(
+                {
+                    "group": {
+                        "language": group[0],
+                        "locale": group[1],
+                        "family_id": group[2],
+                    },
+                    "rows": rows[offset : offset + max_cases],
+                }
+            )
+    return shards
 
 def _read_corpus(path: str | Path) -> list[dict[str, Any]]:
     target = Path(path)
@@ -141,6 +177,92 @@ def _batch_artifacts(
     )
     return layout, cases, review_a, review_b, decisions, metadata
 
+def _artifact_digest(path: Path) -> str | None:
+    return sha256_file(path) if path.is_file() else None
+
+
+def batch_snapshot(layout: BatchLayout) -> dict[str, str | None]:
+    return {
+        "cases_sha256": _artifact_digest(layout.cases),
+        "review_a_blind_sha256": _artifact_digest(layout.review_blind("A")),
+        "review_b_blind_sha256": _artifact_digest(layout.review_blind("B")),
+        "source_observations_sha256": _artifact_digest(layout.source_observations),
+        "source_evidence_sha256": _artifact_digest(layout.source_evidence),
+        "source_conflicts_sha256": _artifact_digest(layout.source_conflicts),
+        "source_candidates_sha256": _artifact_digest(layout.source_candidates),
+    }
+
+
+def snapshot_issues(layout: BatchLayout, metadata: Mapping[str, Any]) -> list[str]:
+    recorded = metadata.get("snapshot_manifest")
+    if not isinstance(recorded, Mapping):
+        return []
+    current = batch_snapshot(layout)
+    return [
+        f"batch snapshot changed: {key}"
+        for key, value in current.items()
+        if recorded.get(key) != value
+    ]
+
+
+def review_receipt_coverage(
+    layout: BatchLayout,
+    slot: str,
+    complete_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    slot = slot.upper()
+    complete = {row.get("case_id") for row in complete_rows}
+    covered: dict[str, list[str]] = defaultdict(list)
+    issues: list[str] = []
+    receipt_dir = layout.review_packet_dir(slot)
+    for receipt_path in sorted(receipt_dir.glob("*.receipt.json")):
+        try:
+            receipt = read_json(receipt_path)
+            number = int(receipt_path.name.split(".", 1)[0])
+            packet_path = layout.review_packet(slot, number)
+            result_name = receipt.get("result")
+            result_path = (
+                layout.root / result_name
+                if isinstance(result_name, str)
+                else packet_path.with_name(packet_path.name.replace(".input.", ".result."))
+            )
+            packet_rows = read_jsonl(packet_path)
+            result_rows = read_jsonl(result_path)
+            validate_review_packet(
+                packet_rows,
+                result_rows,
+                slot=slot,
+                authoritative_rows=read_jsonl(layout.review_blind(slot)),
+            )
+            if receipt.get("packet_sha256") != sha256_file(packet_path):
+                issues.append(f"receipt packet hash mismatch: {receipt_path.name}")
+            if not result_path.is_file() or receipt.get("result_sha256") != sha256_file(result_path):
+                issues.append(f"receipt result hash mismatch: {receipt_path.name}")
+            ids = sorted(row["case_id"] for row in packet_rows)
+            if receipt.get("case_ids_sha256") != case_ids_sha256(ids):
+                issues.append(f"receipt case-set hash mismatch: {receipt_path.name}")
+            assignment = layout.review_assignment_manifest(slot, number)
+            if not assignment.is_file():
+                issues.append(f"assignment manifest missing: {assignment}")
+            for case_id in ids:
+                covered.setdefault(case_id, []).append(receipt_path.name)
+        except (KeyError, OSError, PacketError, TypeError, ValueError) as exc:
+            issues.append(f"invalid receipt {receipt_path.name}: {exc}")
+    duplicate = sorted(case_id for case_id, refs in covered.items() if len(refs) > 1)
+    if duplicate:
+        issues.append("duplicate receipt coverage: " + ", ".join(duplicate))
+    missing = sorted(complete - set(covered))
+    orphan = sorted(set(covered) - complete)
+    if missing:
+        issues.append("completed rows missing receipts: " + ", ".join(missing))
+    if orphan:
+        issues.append("receipts missing from complete artifact: " + ", ".join(orphan))
+    return {
+        "ready": not issues and complete == set(covered),
+        "receipts": len(list(receipt_dir.glob("*.receipt.json"))),
+        "covered": len(covered),
+        "issues": sorted(set(issues)),
+    }
 
 def _review_anomaly_summary(
     review_rows: Iterable[Mapping[str, Any]],
@@ -148,33 +270,39 @@ def _review_anomaly_summary(
     slot: str,
 ) -> dict[str, Any]:
     rows = [dict(row) for row in review_rows]
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        language = row.get("language")
-        key = language if isinstance(language, str) and language else "<missing>"
+        key = (
+            str(row.get("language") or "<missing>"),
+            str(row.get("locale") or "<missing>"),
+            str(row.get("family_id") or "<missing>"),
+        )
         grouped[key].append(row)
-
+    per_group: dict[str, dict[str, Any]] = {}
     per_language: dict[str, dict[str, Any]] = {}
     signals: list[dict[str, Any]] = []
     blocking: list[dict[str, Any]] = []
-    for language in sorted(grouped):
-        anomaly = build_review_anomaly_report(grouped[language], slot=slot)
-        per_language[language] = anomaly
+    for group, group_rows in sorted(grouped.items()):
+        language, locale, family_id = group
+        anomaly = build_review_anomaly_report(group_rows, slot=slot)
+        group_name = "/".join(group)
+        per_group[group_name] = anomaly
+        per_language.setdefault(language, {"signals": [], "blocking_signals": []})
+        per_language[language]["signals"].extend(anomaly["signals"])
+        per_language[language]["blocking_signals"].extend(anomaly["blocking_signals"])
         signals.extend(
-            {"language": language, **signal} for signal in anomaly["signals"]
+            {"language": language, "locale": locale, "family_id": family_id, **signal}
+            for signal in anomaly["signals"]
         )
         blocking.extend(
-            {"language": language, **signal} for signal in anomaly["blocking_signals"]
+            {"language": language, "locale": locale, "family_id": family_id, **signal}
+            for signal in anomaly["blocking_signals"]
         )
-
+    languages = sorted({group[0] for group in grouped})
+    if len(languages) > 1:
+        signals.append({"code": "mixed_language_review_artifact", "languages": languages})
     if len(grouped) > 1:
-        signals.append(
-            {
-                "code": "mixed_language_review_artifact",
-                "languages": sorted(grouped),
-            }
-        )
-
+        signals.append({"code": "multiple_review_families", "groups": sorted(per_group)})
     return {
         "slot": slot,
         "cases": len(rows),
@@ -182,6 +310,7 @@ def _review_anomaly_summary(
         "fresh_review_required": bool(blocking),
         "signals": signals,
         "blocking_signals": blocking,
+        "per_group": per_group,
         "per_language": per_language,
     }
 
@@ -190,6 +319,7 @@ def check_reviews(
     cases: Iterable[Mapping[str, Any]],
     review_a: Iterable[Mapping[str, Any]],
     review_b: Iterable[Mapping[str, Any]],
+    layout: BatchLayout | None = None,
 ) -> dict[str, Any]:
     """Run the exact A/B readiness gate, including deterministic anomaly checks."""
     cases_list = [dict(row) for row in cases]
@@ -208,6 +338,18 @@ def check_reviews(
             issues.append(f"review {slot}: anomaly requires fresh review")
     report["anomalies"] = anomalies
     report["issues"] = sorted(set(issues))
+    if layout is not None:
+        receipt_coverage = {
+            "A": review_receipt_coverage(layout, "A", review_a_list),
+            "B": review_receipt_coverage(layout, "B", review_b_list),
+        }
+        report["receipt_coverage"] = receipt_coverage
+        issues.extend(
+            issue
+            for value in receipt_coverage.values()
+            for issue in value["issues"]
+        )
+        report["issues"] = sorted(set(issues))
     report["ready"] = not report["issues"]
     return report
 
@@ -319,6 +461,9 @@ def _adjudicator_issues(
         review.get("review_a", {}).get("reviewer_id"),
         review.get("review_b", {}).get("reviewer_id"),
     } - {None}
+    reviewer_groups = set()
+    for slot in ("review_a", "review_b"):
+        reviewer_groups.update(review.get(slot, {}).get("independence_groups", []))
     reviewer_families = {
         review.get("review_a", {}).get("model_family"),
         review.get("review_b", {}).get("model_family"),
@@ -326,6 +471,7 @@ def _adjudicator_issues(
     issues: list[str] = []
     adjudicator_ids: set[str] = set()
     adjudicator_families: set[str] = set()
+    adjudicator_groups: set[str] = set()
     for row in decisions:
         identity = row.get("adjudicator")
         if isinstance(identity, Mapping):
@@ -333,10 +479,15 @@ def _adjudicator_issues(
                 adjudicator_ids.add(identity["adjudicator_id"])
             if isinstance(identity.get("model_family"), str):
                 adjudicator_families.add(identity["model_family"])
+            group = identity.get("independence_group") or identity.get("model_family")
+            if isinstance(group, str):
+                adjudicator_groups.add(group)
     if adjudicator_ids & reviewer_ids:
         issues.append("adjudicator_id must differ from reviewer IDs")
     if adjudicator_families & reviewer_families:
         issues.append("adjudicator model_family must differ from reviewer families")
+    if adjudicator_groups & reviewer_groups:
+        issues.append("adjudicator independence_group must differ from reviewer groups")
     return issues
 
 
@@ -357,7 +508,9 @@ def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str
         batch_root
     )
     existing = _read_corpus(corpus_path)
-    review = check_reviews(cases, review_a, review_b)
+    snapshot_provenance_issues = snapshot_issues(layout, metadata)
+    receipt_layout = layout if isinstance(metadata.get("snapshot_manifest"), Mapping) else None
+    review = check_reviews(cases, review_a, review_b, layout=receipt_layout)
     case_ids = {case.get("case_id") for case in cases}
     decision_ids = [decision.get("case_id") for decision in decisions]
     coverage_ok = (
@@ -374,7 +527,8 @@ def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str
         and coverage_ok
         and not invalid_accepts
         and decisions_valid
-        and not adjudication_issues,
+        and not adjudication_issues
+        and not snapshot_provenance_issues,
     )
     return {
         "batch_id": metadata.get("batch_id", layout.root.name),
@@ -388,6 +542,7 @@ def batch_preflight(batch_root: str | Path, corpus_path: str | Path) -> dict[str
         "adjudication_issues": adjudication_issues,
         "ready_to_finalize": ready,
         "review_issues": review["issues"],
+        "snapshot_issues": snapshot_provenance_issues,
     }
 
 
@@ -402,7 +557,12 @@ def integrate_batch(
     layout, cases, review_a, review_b, decisions, metadata = _batch_artifacts(
         batch_root
     )
-    review = check_reviews(cases, review_a, review_b)
+    receipt_layout = layout if isinstance(metadata.get("snapshot_manifest"), Mapping) else None
+    review = check_reviews(cases, review_a, review_b, layout=receipt_layout)
+    if snapshot_issues(layout, metadata):
+        raise ValueError(
+            "batch snapshot changed: " + ", ".join(snapshot_issues(layout, metadata))
+        )
     if not review["ready"]:
         raise ValueError("review-check failed: " + "; ".join(review["issues"]))
     try:
@@ -527,17 +687,43 @@ def finalize_batch(
     lineage_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run batch integration and mark a written batch finalized."""
+    layout, cases, _a, _b, decisions, metadata = _batch_artifacts(batch_root)
+    case_sha256 = _rows_digest(cases)
+    decision_sha256 = _rows_digest(decisions)
+    corpus_before_sha256 = _rows_digest(_read_corpus(corpus_path))
+    finalization = metadata.get("finalization")
+    if metadata.get("state") == "finalized" and isinstance(finalization, Mapping):
+        expected = {
+            "case_sha256": case_sha256,
+            "decision_sha256": decision_sha256,
+            "corpus_before_sha256": corpus_before_sha256,
+        }
+        if any(finalization.get(key) != value for key, value in expected.items()):
+            raise ValueError("finalized batch artifacts have changed; create a new revision")
+        summary = (
+            read_json(layout.integration_summary)
+            if layout.integration_summary.is_file()
+            else {"batch_id": layout.root.name}
+        )
+        summary = dict(summary)
+        summary.update({"state": "finalized", "idempotent": True})
+        return summary
     result = integrate_batch(
         batch_root, corpus_path, write=write, lineage_path=lineage_path
     )
     if write:
-        layout, _cases, _a, _b, _decisions, metadata = _batch_artifacts(batch_root)
         metadata = dict(metadata)
+        corpus_after_sha256 = _rows_digest(_read_corpus(corpus_path))
         metadata["state"] = "finalized"
         metadata["finalization"] = {
             "accepted": result["records"],
             "excluded": len(result["excluded"]),
             "retry_deferred": len(result["retry"]),
+            "case_sha256": case_sha256,
+            "decision_sha256": decision_sha256,
+            "corpus_before_sha256": corpus_before_sha256,
+            "corpus_after_sha256": corpus_after_sha256,
+            "integration_revision": _rows_digest(result.get("review", {}).get("comparisons", [])),
         }
         write_json(layout.metadata, metadata)
         result["state"] = "finalized"
@@ -553,5 +739,6 @@ __all__ = [
     "check_reviews",
     "finalize_batch",
     "integrate_batch",
+    "shard_candidates",
     "validate_accepted_decisions",
 ]

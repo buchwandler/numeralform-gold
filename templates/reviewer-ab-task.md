@@ -1,9 +1,9 @@
-# Numeralform Gold independent reviewer
+# Isolated Numeralform Gold reviewer task
 
-You are reviewer `<A_OR_B>` for batch `<BATCH_ID>`, using truthful identity `<REVIEWER_ID>`.
+TASK_NOT_BOUND
 
-Read only the blind packet supplied with this task. Do not seek or infer source observations, reference output, current implementation output, another review, adjudication, or canonical answers. Review every semantic request independently. Preserve `case_id` and all blind fields exactly.
+This template is internal and is not a runnable reviewer assignment. If the generated assignment manifest and bounded input are absent, stop immediately with exactly `TASK_NOT_BOUND`. Do not inspect the repository, work root, source cache, previous reviews, canonical corpus, or any other filesystem path.
 
-For each case return one JSONL row with `review_schema_version: "1.0.0"`, the assigned slot, truthful `reviewer` metadata, an annotation status of `form`, `ambiguous`, `invalid_request`, or `capability_blocker`, and `review.status: "review_<a_or_b>_complete"`. A `form` result requires a complete oracle with canonical, accepted, and rejected strings. A capability blocker must include a retryable structured blocker and must not fabricate an oracle.
+When a generated assignment is present, read only the embedded assignment manifest and input. Preserve every blind field and `case_id`. Review each request independently.
 
-Do not change the blind packet. Return only the completed JSONL artifact. Use the repository merge command rather than manually editing the complete artifact.
+Return only `result.jsonl` with one completed row per assigned case. Do not run commands or perform file discovery. Do not invent rejected forms merely to populate the optional evidence list. A `form` result requires an oracle. A capability blocker requires a retryable structured blocker and no fabricated oracle.

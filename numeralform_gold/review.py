@@ -11,6 +11,37 @@ REVIEW_SCHEMA_VERSION = "1.0.0"
 REVIEW_PROTOCOL_VERSION = "numeral-review-v1"
 ANNOTATION_STATUSES = {"form", "ambiguous", "invalid_request", "capability_blocker"}
 REVIEW_COMPLETE_STATUSES = {"A": "review_a_complete", "B": "review_b_complete"}
+REVIEW_ALLOWED_KEYS = {
+    "review_schema_version",
+    "case_id",
+    "reviewer_slot",
+    "language",
+    "locale",
+    "input",
+    "mode",
+    "grammar",
+    "family_id",
+    "reviewer",
+    "annotation",
+    "review",
+}
+REVIEWER_ALLOWED_KEYS = {
+    "reviewer_id",
+    "kind",
+    "provider",
+    "model",
+    "model_family",
+    "protocol_version",
+    "independence_group",
+}
+ANNOTATION_ALLOWED_KEYS = {"status", "oracle", "blocker", "grammar_assessment", "notes"}
+GRAMMAR_ASSESSMENT_ALLOWED_KEYS = {
+    "request_is_well_formed",
+    "features_supported",
+    "interpreted_grammar",
+    "missing_features",
+    "notes",
+}
 FORBIDDEN_BLIND_KEYS = {
     "source_observations",
     "source_form",
@@ -160,6 +191,12 @@ def reviewer_model_family(row: Mapping[str, Any]) -> str | None:
     return next((value for value in values if _nonempty_string(value)), None)
 
 
+def reviewer_independence_group(row: Mapping[str, Any]) -> str | None:
+    reviewer = row.get("reviewer")
+    if isinstance(reviewer, Mapping) and _nonempty_string(reviewer.get("independence_group")):
+        return reviewer["independence_group"]
+    return reviewer_model_family(row)
+
 def _oracle_issues(oracle: Any, label: str) -> list[str]:
     if not isinstance(oracle, Mapping):
         return [f"{label}: annotation.oracle must be an object"]
@@ -177,10 +214,11 @@ def _oracle_issues(oracle: Any, label: str) -> list[str]:
         issues.append(f"{label}: oracle.accepted must be a non-empty list of strings")
     elif canonical not in accepted:
         issues.append(f"{label}: oracle.canonical must appear in oracle.accepted")
-    if not isinstance(rejected, list) or any(
-        not _nonempty_string(value) for value in rejected
+    if "rejected" in oracle and (
+        not isinstance(rejected, list)
+        or any(not _nonempty_string(value) for value in rejected)
     ):
-        issues.append(f"{label}: oracle.rejected must be a list of strings")
+        issues.append(f"{label}: oracle.rejected must be a list of strings when supplied")
     if isinstance(accepted, list) and len(accepted) != len(set(accepted)):
         issues.append(f"{label}: oracle.accepted must not contain duplicates")
     if isinstance(rejected, list) and len(rejected) != len(set(rejected)):
@@ -207,24 +245,64 @@ def _blocker_issues(blocker: Any, label: str) -> list[str]:
     return issues
 
 
+
+def _unknown_keys(value: Mapping[str, Any], allowed: set[str], label: str) -> list[str]:
+    return [f"{label}: unexpected properties: {', '.join(sorted(set(value) - allowed))}"] if set(value) - allowed else []
+
+
+def _grammar_assessment_issues(assessment: Any, label: str) -> list[str]:
+    if not isinstance(assessment, Mapping):
+        return [f"{label}: annotation.grammar_assessment must be an object"]
+    issues = _unknown_keys(assessment, GRAMMAR_ASSESSMENT_ALLOWED_KEYS, label)
+    for key in ("request_is_well_formed", "features_supported"):
+        if not isinstance(assessment.get(key), bool):
+            issues.append(f"{label}: grammar_assessment.{key} must be boolean")
+    if "interpreted_grammar" in assessment and not isinstance(
+        assessment["interpreted_grammar"], Mapping
+    ):
+        issues.append(f"{label}: grammar_assessment.interpreted_grammar must be an object")
+    if "missing_features" in assessment and (
+        not isinstance(assessment["missing_features"], list)
+        or any(not _nonempty_string(value) for value in assessment["missing_features"])
+    ):
+        issues.append(f"{label}: grammar_assessment.missing_features must be strings")
+    if "notes" in assessment and not isinstance(assessment["notes"], str):
+        issues.append(f"{label}: grammar_assessment.notes must be a string")
+    return issues
 def _annotation_issues(row: Mapping[str, Any], label: str) -> list[str]:
     annotation = row.get("annotation")
     if not isinstance(annotation, Mapping):
         return [f"{label}: annotation must be an object"]
+    issues = _unknown_keys(annotation, ANNOTATION_ALLOWED_KEYS, label)
     status = annotation.get("status")
     if status not in ANNOTATION_STATUSES:
-        return [f"{label}: invalid annotation status {status!r}"]
-    issues: list[str] = []
+        return issues + [f"{label}: invalid annotation status {status!r}"]
     assessment = annotation.get("grammar_assessment")
-    if not isinstance(assessment, Mapping):
-        issues.append(f"{label}: annotation.grammar_assessment must be an object")
+    issues.extend(_grammar_assessment_issues(assessment, label))
     if status == "form":
         issues.extend(_oracle_issues(annotation.get("oracle"), label))
+        if isinstance(assessment, Mapping) and (
+            assessment.get("request_is_well_formed") is not True
+            or assessment.get("features_supported") is not True
+        ):
+            issues.append(f"{label}: form requires supported well-formed grammar assessment")
     elif status == "capability_blocker":
         issues.extend(_blocker_issues(annotation.get("blocker"), label))
         if "oracle" in annotation:
+            issues.append(f"{label}: capability_blocker must not contain oracle")
+    elif status == "invalid_request":
+        if isinstance(assessment, Mapping) and assessment.get("request_is_well_formed") is not False:
+            issues.append(f"{label}: invalid_request requires request_is_well_formed=false")
+        if annotation.get("oracle") is not None:
+            issues.append(f"{label}: invalid_request must not contain oracle")
+    elif status == "ambiguous":
+        if not _nonempty_string(annotation.get("notes")) and not (
+            isinstance(assessment, Mapping) and _nonempty_string(assessment.get("notes"))
+        ):
+            issues.append(f"{label}: ambiguous requires an explanation")
+        if "oracle" in annotation and annotation["oracle"] is not None:
             issues.extend(_oracle_issues(annotation["oracle"], label))
-    elif "oracle" in annotation and annotation["oracle"] is not None:
+    elif annotation.get("oracle") is not None:
         issues.extend(_oracle_issues(annotation["oracle"], label))
     return issues
 
@@ -241,11 +319,13 @@ def validate_review_rows(
     indexed: dict[str, dict[str, Any]] = {}
     reviewer_ids: set[str] = set()
     model_families: set[str] = set()
+    independence_groups: set[str] = set()
     issues: list[dict[str, Any]] = []
     blockers = 0
     for index, row in enumerate(rows_list):
         label = str(row.get("case_id") or f"row-{index}")
         row_errors: list[str] = []
+        row_errors.extend(_unknown_keys(row, REVIEW_ALLOWED_KEYS, label))
         if row.get("review_schema_version") != REVIEW_SCHEMA_VERSION:
             row_errors.append(
                 f"{label}: review_schema_version must be {REVIEW_SCHEMA_VERSION}"
@@ -262,20 +342,44 @@ def validate_review_rows(
             row_errors.append(f"{label}: language is required")
         if not isinstance(row.get("input"), Mapping):
             row_errors.append(f"{label}: input must be an object")
+        elif (
+            row["input"].get("kind") not in {"integer", "decimal", "fraction"}
+            or not _nonempty_string(row["input"].get("value"))
+        ):
+            row_errors.append(f"{label}: input.kind and input.value are required")
         if not _nonempty_string(row.get("mode")):
             row_errors.append(f"{label}: mode is required")
         if not isinstance(row.get("grammar"), Mapping):
             row_errors.append(f"{label}: grammar must be an object")
-        reviewer_id = _reviewer_id(row)
-        family = reviewer_model_family(row)
-        if reviewer_id:
+        reviewer = row.get("reviewer")
+        if not isinstance(reviewer, Mapping):
+            row_errors.append(f"{label}: reviewer must be an object")
+            reviewer_id = None
+            family = None
+        else:
+            row_errors.extend(_unknown_keys(reviewer, REVIEWER_ALLOWED_KEYS, label))
+            reviewer_id = reviewer.get("reviewer_id")
+            family = reviewer.get("model_family")
+            if not _nonempty_string(reviewer_id):
+                row_errors.append(f"{label}: reviewer.reviewer_id is required")
+            if reviewer.get("kind") != "llm":
+                row_errors.append(f"{label}: reviewer.kind must be llm")
+            if reviewer.get("protocol_version") != REVIEW_PROTOCOL_VERSION:
+                row_errors.append(
+                    f"{label}: reviewer.protocol_version must be {REVIEW_PROTOCOL_VERSION}"
+                )
+            if not _nonempty_string(family):
+                row_errors.append(f"{label}: reviewer.model_family is required")
+            for key in ("provider", "model", "independence_group"):
+                if key in reviewer and not _nonempty_string(reviewer[key]):
+                    row_errors.append(f"{label}: reviewer.{key} must be a string")
+        if _nonempty_string(reviewer_id):
             reviewer_ids.add(reviewer_id)
-        else:
-            row_errors.append(f"{label}: reviewer.reviewer_id is required")
-        if family:
+        if _nonempty_string(family):
             model_families.add(family)
-        else:
-            row_errors.append(f"{label}: reviewer.model_family is required")
+        independence_group = reviewer_independence_group(row)
+        if independence_group:
+            independence_groups.add(independence_group)
         lifecycle = row.get("review")
         if (
             not isinstance(lifecycle, Mapping)
@@ -306,6 +410,13 @@ def validate_review_rows(
                 "message": f"review {expected_slot} must contain one stable model_family",
             }
         )
+    if len(independence_groups) != 1:
+        issues.append(
+            {
+                "case_id": None,
+                "message": f"review {expected_slot} must contain one stable independence_group",
+            }
+        )
     return {
         "slot": expected_slot,
         "rows": len(rows_list),
@@ -313,6 +424,7 @@ def validate_review_rows(
         "model_family": next(iter(model_families), None),
         "reviewer_ids": sorted(reviewer_ids),
         "model_families": sorted(model_families),
+        "independence_groups": sorted(independence_groups),
         "capability_blockers": blockers,
         "issues": issues,
         "ready": not issues,
@@ -410,11 +522,10 @@ def review_preflight(
     ):
         issues.append("reviewer A and reviewer B must have distinct reviewer_id values")
     if (
-        report_a["model_family"] == report_b["model_family"]
-        and report_a["model_family"] is not None
+        set(report_a["independence_groups"]) & set(report_b["independence_groups"])
     ):
         issues.append(
-            "reviewer A and reviewer B must have distinct model_family values"
+            "review A and reviewer B must have distinct independence_group values"
         )
     if report_a["capability_blockers"] or report_b["capability_blockers"]:
         issues.append("capability blockers prevent review readiness")
@@ -449,6 +560,7 @@ __all__ = [
     "neutral_review_case",
     "review_case",
     "review_preflight",
+    "reviewer_independence_group",
     "reviewer_model_family",
     "validate_review_rows",
 ]

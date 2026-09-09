@@ -49,7 +49,10 @@ def completed(row, slot, reviewer_id, family):
             "accepted": [f"word-{row['input']['value']}"],
             "rejected": [],
         },
-        "grammar_assessment": {"request_is_well_formed": True},
+        "grammar_assessment": {
+            "request_is_well_formed": True,
+            "features_supported": True,
+        },
     }
     result["review"] = {"status": f"review_{slot.lower()}_complete"}
     return result
@@ -319,8 +322,9 @@ def test_batch_status_respects_review_readiness_gate(tmp_path, capsys):
     write_jsonl(layout.review_complete("B"), review_b)
     assert main(["--work-root", str(work), "batch-status", "--batch", "status"]) == 0
     ready = json.loads(capsys.readouterr().out)
-    assert ready["review_ready"]
-    assert ready["next_role"] == "adjudicator"
+    assert not ready["review_ready"]
+    assert ready["next_role"] == "review-remediation"
+    assert any("receipts" in issue for issue in ready["review_issues"])
 
 
 def test_true_cli_workflow_uses_slot_artifacts_and_finalizes(tmp_path: Path):
@@ -405,6 +409,8 @@ def test_true_cli_workflow_uses_slot_artifacts_and_finalizes(tmp_path: Path):
                 "adjudication-merge",
                 "--batch",
                 "pilot",
+                "--packet",
+                str(adj_packet),
                 "--packet-result",
                 str(adj_result),
                 "--finalize",
@@ -583,8 +589,8 @@ def test_agent_bundle_resolves_role_and_batch_placeholders(tmp_path: Path):
     assert "<A_OR_B>" not in text
     assert "<BATCH_ID>" not in text
     assert "<REVIEWER_ID>" not in text
-    assert "review-merge" in text
-
+    assert "result.jsonl" in text
+    assert "merge" not in text
 
 def test_packet_language_selection_groups_before_limits():
     rows = [

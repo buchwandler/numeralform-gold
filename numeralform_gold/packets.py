@@ -20,6 +20,37 @@ ADJUDICATION_PACKET_MAX_CASES = 25
 ADJUDICATION_PACKET_MAX_BYTES = 96 * 1024
 DECISIONS = {"accept", "exclude", "unresolved"}
 
+REVIEW_PACKET_KEYS = {
+    "review_schema_version",
+    "case_id",
+    "reviewer_slot",
+    "language",
+    "locale",
+    "input",
+    "mode",
+    "grammar",
+    "family_id",
+    "annotation",
+    "review",
+}
+ADJUDICATION_ALLOWED_KEYS = {
+    "case_id",
+    "adjudicator",
+    "decision",
+    "final_oracle",
+    "rationale",
+    "evidence_used",
+    "blocker",
+}
+ADJUDICATOR_ALLOWED_KEYS = {
+    "adjudicator_id",
+    "kind",
+    "provider",
+    "model",
+    "model_family",
+    "protocol_version",
+    "independence_group",
+}
 
 class PacketError(ValueError):
     """Raised when a packet or merge would violate its contract."""
@@ -41,12 +72,50 @@ def case_ids_sha256(case_ids: Iterable[str]) -> str:
     payload = json.dumps(sorted(case_ids), separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+def packet_group_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return the semantic group key used to keep packets homogeneous."""
+    source = row
+    if isinstance(row.get("case"), Mapping):
+        source = row["case"]
+    return (
+        source.get("language"),
+        source.get("locale"),
+        source.get("family_id"),
+    )
+
+
+def next_packet_number(packet_dir: str | Path) -> int:
+    """Allocate the next numeric packet number without reusing a gap."""
+    directory = Path(packet_dir)
+    numbers: list[int] = []
+    for path in directory.glob("*.input.jsonl"):
+        try:
+            numbers.append(int(path.name.split(".", 1)[0]))
+        except ValueError:
+            continue
+    return max(numbers, default=0) + 1
+
+
+def _validate_packet_projection(rows: Mapping[str, Mapping[str, Any]]) -> None:
+    for case_id, row in rows.items():
+        unknown = set(row) - REVIEW_PACKET_KEYS
+        if unknown:
+            raise PacketError(
+                f"assigned packet contains unknown fields for {case_id}: "
+                + ", ".join(sorted(unknown))
+            )
+        try:
+            assert_blind_safe(row)
+        except Exception as exc:
+            raise PacketError(f"assigned packet is not blind-safe for {case_id}") from exc
+
 
 def validate_review_packet(
     packet_rows: Iterable[Mapping[str, Any]],
     result_rows: Iterable[Mapping[str, Any]],
     *,
     slot: str,
+    authoritative_rows: Iterable[Mapping[str, Any]] | None = None,
     max_cases: int = REVIEW_PACKET_MAX_CASES,
     max_bytes: int = REVIEW_PACKET_MAX_BYTES,
 ) -> dict[str, Any]:
@@ -54,6 +123,21 @@ def validate_review_packet(
     results = _indexed_unique(result_rows, "packet result")
     if not packet:
         raise PacketError("assigned packet must not be empty")
+    _validate_packet_projection(packet)
+    if authoritative_rows is not None:
+        authoritative = _indexed_unique(authoritative_rows, "authoritative blind")
+        if set(packet) - set(authoritative):
+            raise PacketError("assigned packet contains unknown case IDs")
+        for case_id, row in packet.items():
+            expected = {
+                key: value
+                for key, value in _without_forbidden(authoritative[case_id]).items()
+                if key in REVIEW_PACKET_KEYS
+            }
+            if row != expected:
+                raise PacketError(
+                    f"assigned packet does not match authoritative blind projection: {case_id}"
+                )
     if set(packet) != set(results):
         raise PacketError(
             "packet and result case-ID sets must match: "
@@ -69,23 +153,24 @@ def validate_review_packet(
         raise PacketError(
             f"assigned packet exceeds byte limit ({packet_bytes} > {max_bytes})"
         )
-    languages = {row.get("language") for row in packet.values()}
-    if len(languages) != 1 or None in languages:
-        raise PacketError(
-            f"assigned packet must contain one language: {sorted(languages, key=str)}"
-        )
-    result_languages = {row.get("language") for row in results.values()}
-    if result_languages != languages:
-        raise PacketError("packet result language does not match assigned packet")
+    groups = {packet_group_key(row) for row in packet.values()}
+    if len(groups) != 1 or any(value is None for value in next(iter(groups))):
+        raise PacketError(f"assigned packet must contain one semantic group: {sorted(groups, key=str)}")
+    result_groups = {packet_group_key(row) for row in results.values()}
+    if result_groups != groups:
+        raise PacketError("packet result group does not match assigned packet")
     anomaly = build_review_anomaly_report(results.values(), slot=slot)
     if anomaly["blocking_signals"]:
         raise PacketError(
             "packet result has blocking anomaly: "
             + anomaly["blocking_signals"][0]["code"]
         )
+    group = next(iter(groups))
     return {
         "cases": len(packet),
-        "language": next(iter(languages)),
+        "language": group[0],
+        "locale": group[1],
+        "family_id": group[2],
         "packet_bytes": packet_bytes,
         "anomaly_ready": anomaly["ready"],
         "anomaly": anomaly,
@@ -126,34 +211,30 @@ def select_packet_rows(
     if max_cases <= 0 or max_bytes <= 0:
         raise PacketError("max_cases and max_bytes must be positive")
     completed = set(completed_ids)
-    selected: list[dict[str, Any]] = []
-    total_bytes = 0
     ordered = sorted(
         (dict(row) for row in rows), key=lambda row: str(row.get(identity_field, ""))
     )
-    selected_language: str | None = language
-    if selected_language is None:
-        selected_language = next(
-            (
-                row.get("language")
-                for row in ordered
-                if isinstance(row.get("language"), str)
-            ),
-            None,
-        )
+    eligible: list[dict[str, Any]] = []
     for row in ordered:
         identity = row.get(identity_field)
         if not isinstance(identity, str) or not identity:
             raise PacketError(f"packet row is missing {identity_field}")
         if identity in completed:
             continue
-        row_language = row.get("language")
-        if language is not None and row_language != language:
+        if language is not None and row.get("language") != language:
             continue
-        if selected_language is not None and row_language != selected_language:
+        eligible.append(row)
+    if not eligible:
+        return []
+    selected_group = packet_group_key(eligible[0])
+    selected: list[dict[str, Any]] = []
+    total_bytes = 0
+    for row in eligible:
+        if packet_group_key(row) != selected_group:
             continue
         if len(selected) >= max_cases:
             break
+        identity = row[identity_field]
         row_bytes = serialized_row_bytes(row)
         if row_bytes > max_bytes:
             raise PacketError(
@@ -213,6 +294,14 @@ def review_packet_rows(
 ) -> list[dict[str, Any]]:
     """Project blind-review rows and select the next uncompleted packet."""
     projected = [_without_forbidden(_public(row)) for row in blind_rows]
+    projected = [
+        {
+            key: value
+            for key, value in _without_forbidden(_public(row)).items()
+            if key in REVIEW_PACKET_KEYS
+        }
+        for row in blind_rows
+    ]
     assert_blind_safe(projected)
     completed_ids = [
         row.get("case_id")
@@ -271,7 +360,9 @@ def merge_review_rows(
     results = _indexed_unique(result_rows, "packet result")
     if packet_rows is None:
         raise PacketError("assigned packet is required")
-    validate_review_packet(packet_rows, results.values(), slot=slot)
+    validate_review_packet(
+        packet_rows, results.values(), slot=slot, authoritative_rows=blind.values()
+    )
     for case_id, row in results.items():
         if case_id not in blind:
             raise PacketError(f"review result has unknown case_id: {case_id}")
@@ -370,6 +461,48 @@ def adjudication_packet_rows(
     )
 
 
+def validate_adjudication_packet(
+    packet_rows: Iterable[Mapping[str, Any]],
+    result_rows: Iterable[Mapping[str, Any]],
+    *,
+    max_cases: int = ADJUDICATION_PACKET_MAX_CASES,
+    max_bytes: int = ADJUDICATION_PACKET_MAX_BYTES,
+) -> dict[str, Any]:
+    packet = _indexed_unique(packet_rows, "assigned adjudication packet")
+    results = _indexed_unique(result_rows, "adjudication packet result")
+    if not packet:
+        raise PacketError("assigned adjudication packet must not be empty")
+    if set(packet) != set(results):
+        raise PacketError(
+            "adjudication packet and result case-ID sets must match: "
+            f"missing={sorted(set(packet) - set(results))} "
+            f"extra={sorted(set(results) - set(packet))}"
+        )
+    if len(packet) > max_cases:
+        raise PacketError(
+            f"adjudication packet exceeds case limit ({len(packet)} > {max_cases})"
+        )
+    packet_bytes = sum(serialized_row_bytes(row) for row in packet.values())
+    if packet_bytes > max_bytes:
+        raise PacketError(
+            f"adjudication packet exceeds byte limit ({packet_bytes} > {max_bytes})"
+        )
+    for row in results.values():
+        _validate_decision(row)
+    identities = {
+        row.get("adjudicator", {}).get("adjudicator_id")
+        for row in results.values()
+        if isinstance(row.get("adjudicator"), Mapping)
+    }
+    if len(identities) != 1 or None in identities:
+        raise PacketError("adjudication result must contain one adjudicator identity")
+    return {
+        "cases": len(packet),
+        "packet_bytes": packet_bytes,
+        "case_ids": sorted(packet),
+        "adjudicator_id": next(iter(identities)),
+    }
+
 def _public_list(rows: Any) -> list[Any]:
     if not isinstance(rows, list):
         return []
@@ -379,6 +512,9 @@ def _public_list(rows: Any) -> list[Any]:
 def _validate_oracle(oracle: Any, case_id: str) -> None:
     if not isinstance(oracle, Mapping):
         raise PacketError(f"{case_id}: accept decision requires final_oracle")
+    unknown = set(oracle) - {"canonical", "accepted", "rejected"}
+    if unknown:
+        raise PacketError(f"{case_id}: final_oracle has unknown fields: {sorted(unknown)}")
     canonical = oracle.get("canonical")
     accepted = oracle.get("accepted")
     rejected = oracle.get("rejected")
@@ -391,13 +527,13 @@ def _validate_oracle(oracle: Any, case_id: str) -> None:
         or any(not isinstance(v, str) or not v for v in accepted)
     ):
         raise PacketError(f"{case_id}: final_oracle.accepted must contain canonical")
-    if not isinstance(rejected, list) or any(
-        not isinstance(v, str) or not v for v in rejected
+    if "rejected" in oracle and (
+        not isinstance(rejected, list)
+        or any(not isinstance(v, str) or not v for v in rejected)
     ):
-        raise PacketError(f"{case_id}: final_oracle.rejected must be a list of strings")
-    if set(accepted) & set(rejected):
+        raise PacketError(f"{case_id}: final_oracle.rejected must be a list of strings when supplied")
+    if isinstance(rejected, list) and set(accepted) & set(rejected):
         raise PacketError(f"{case_id}: final_oracle accepted/rejected overlap")
-
 
 def _validate_blocker(blocker: Any, case_id: str) -> None:
     if not isinstance(blocker, Mapping):
@@ -413,6 +549,9 @@ def _validate_decision(row: Mapping[str, Any]) -> None:
     case_id = row.get("case_id")
     if not isinstance(case_id, str) or not case_id:
         raise PacketError("adjudication row is missing case_id")
+    unknown = set(row) - ADJUDICATION_ALLOWED_KEYS
+    if unknown:
+        raise PacketError(f"{case_id}: adjudication has unknown fields: {sorted(unknown)}")
     adjudicator = row.get("adjudicator")
     if (
         not isinstance(adjudicator, Mapping)
@@ -423,6 +562,11 @@ def _validate_decision(row: Mapping[str, Any]) -> None:
     ):
         raise PacketError(
             f"{case_id}: adjudicator identity and model_family are required"
+        )
+    unknown_adjudicator = set(adjudicator) - ADJUDICATOR_ALLOWED_KEYS
+    if unknown_adjudicator:
+        raise PacketError(
+            f"{case_id}: adjudicator has unknown fields: {sorted(unknown_adjudicator)}"
         )
     decision = row.get("decision")
     if decision not in DECISIONS:
@@ -446,12 +590,14 @@ def _validate_decision(row: Mapping[str, Any]) -> None:
 def merge_adjudication_rows(
     existing_rows: Iterable[Mapping[str, Any]],
     result_rows: Iterable[Mapping[str, Any]],
+    packet_rows: Iterable[Mapping[str, Any]],
     *,
     output: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Merge adjudication results atomically with one stable identity."""
     existing = _indexed_unique(existing_rows, "existing adjudication")
     results = _indexed_unique(result_rows, "packet result")
+    validate_adjudication_packet(packet_rows, results.values())
     merged = dict(existing)
     identities = {
         (row.get("adjudicator") or {}).get("adjudicator_id")
@@ -499,6 +645,7 @@ __all__ = [
     "ADJUDICATION_PACKET_MAX_BYTES",
     "ADJUDICATION_PACKET_MAX_CASES",
     "DECISIONS",
+    "REVIEW_PACKET_KEYS",
     "REVIEW_PACKET_MAX_BYTES",
     "REVIEW_PACKET_MAX_CASES",
     "PacketError",
@@ -508,9 +655,12 @@ __all__ = [
     "finalize_adjudication",
     "merge_adjudication_rows",
     "merge_review_rows",
+    "next_packet_number",
+    "packet_group_key",
     "review_packet_rows",
     "select_packet_rows",
     "serialized_row_bytes",
     "sha256_file",
+    "validate_adjudication_packet",
     "validate_review_packet",
 ]
